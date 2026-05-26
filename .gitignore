@@ -1,0 +1,40 @@
+# Binaries
+*.out
+*.exe
+*.o
+*.a
+
+# macOS
+.DS_Store
+
+# Vim
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Environment
+.env
+
+# Build folders
+build/
+dist/
+
+# Go
+vendor/
+
+# AI / Whisper models
+models/
+*.bin
+*.gguf
+*.onnx
+*.pt
+*.pth
+*.safetensors
+
+# Temporary audio
+*.wav
+*.mp3
+
+aenv/
