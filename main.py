@@ -9,16 +9,26 @@ from ts_manager import TranscriptionManager, TranscriptionJob
 
 app = FastAPI()
 
-app.mount("/static", StaticFiles(directory="static"), name="static")
+#app.mount("/static", StaticFiles(directory="static"), name="static")
 
-@app.get("/")
-def home():
-    return FileResponse("static/index.html")
+
+"""
+    @deprecated will be removing this as soon as possible 
+"""
+
+#@app.get("/")
+#def home():
+#    return FileResponse("static/index.html")
+
+
+
+
+
 
 """
     constants
 """
-CHUNK_DURATION_S=10
+CHUNK_DURATION_S=5
 SAMPLE_RATE=16000
 BYTES_PER_SAMPLE=2
 FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
@@ -27,7 +37,23 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 """ 
     global manager for managing jobs right now everything is defaulting to default value  
 """
-manager = TranscriptionManager()
+manager = TranscriptionManager(device="cuda", compute_type="float16",condition_on_previous_text=False)
+
+
+"""
+    health check for amazon load balancer for checking the system load 
+"""
+@app.get('/health')
+def health():
+    qsize = manager.job_queue.qsize()
+    if qsize > 30:
+       return Response(status_code=503)
+    return {
+            "status": "ok",
+            "queue_size": qsize,
+            "queue_max": manager.job_queue.maxsize,
+    }
+
 
 
 @app.on_event("startup")
@@ -66,10 +92,5 @@ async def audio_ws(websocket:WebSocket):
 
     except WebSocketDisconnect as e:
         print("Client disconnected")
-        if len(clientbuffer) > SAMPLE_RATE: 
-            # pipeline transcribe
-            job = TranscriptionJob(
-                    audio_buffer=bytes(clientbuffer),
-                    websocket=websocket
-            )
-            await manager.submit_job(job)
+
+

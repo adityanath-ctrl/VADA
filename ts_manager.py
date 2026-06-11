@@ -10,7 +10,7 @@ class TranscriptionJob:
 
 
 class TranscriptionManager:
-    def __init__(self,model_name="base",num_workers = 4,device="cpu", compute_type='int8', queue_size=100):
+    def __init__(self,model_name="base",num_workers = 6,device="cuda", compute_type='float16', queue_size=50,condition_on_previous_text=False):
 
         """
             one centralised pipeline for GPU model
@@ -18,7 +18,8 @@ class TranscriptionManager:
         """
         self.pipeline    =   ts_pipleline.TranscriptionPipeline(
                                 device=device,
-                                compute_type=compute_type
+                                compute_type=compute_type,
+                                condition_on_previous_text=condition_on_previous_text
                              )
 
         self.num_workers =   num_workers

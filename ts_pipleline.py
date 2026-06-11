@@ -1,13 +1,16 @@
 from faster_whisper import WhisperModel
 import numpy as np
 
+MAX_CUDA_WORKERS=6
+MAX_CPU_WORKERS=4
 
 class TranscriptionPipeline:
-    def __init__(self,model="base", device="cpu", compute_type="int8", beam_size = 2, 
+    def __init__(self,model="base", device="cuda", compute_type="float16", beam_size = 1, 
                        no_speech_threshold=0.5, avg_logprob_threshold=-1.0, 
                        condition_on_previous_text=False):
                        
-        self.model = WhisperModel(model, device=device, compute_type=compute_type)
+        self.model = WhisperModel(model, device=device, compute_type=compute_type,num_workers=MAX_CUDA_WORKERS,cpu_threads=MAX_CPU_WORKERS)
+
         self.vad_filter = True
         self.beam_size = beam_size
         self.min_time = 0.5
@@ -55,7 +58,7 @@ class TranscriptionPipeline:
             no_speech_threshold=self.no_speech_threshold,
             log_prob_threshold=self.avg_logprob_threshold,
             compression_ratio_threshold=2.4,
-            condition_on_previous_text=True
+            condition_on_previous_text=self.condition_on_previous_text
         )
 
         text = self.process_segments(segments)
