@@ -41,3 +41,6 @@ typing-inspection==0.4.2
 typing_extensions==4.15.0
 uvicorn==0.39.0
 websockets==15.0.1
+psutil
+pynvml
+nemo_toolkit[asr]==2.4.0

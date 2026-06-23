@@ -62,30 +62,22 @@ class TranscriptionPipeline:
             no_speech_threshold=self.no_speech_threshold,
             log_prob_threshold=self.avg_logprob_threshold,
             compression_ratio_threshold=2.4,
-            condition_on_previous_text=self.condition_on_previous_text
-        )
-        
-        transcript = []
-        lines = []
+            condition_on_previous_text=self.condition_on_previous_text,
+            word_timestamps=True
+        )    
+
+        words = []
 
         for segment in segments:
-            transcript.append({
-                "start": segment.start,
-                "end": segment.end,
-                "text": segment.text
-            })
+            for word in segment.words:
+                words.append({
+                    "start": word.start,
+                    "end": word.end,
+                    "word": word.word.strip()
+                })
 
-        for segment in transcript:
-            lines.append(
-            f"{format_timestamp(segment['start'])}: "
-            f"{segment['text']}"
-        )
-
-        final_text = "\n".join(lines)       
-        return final_text
-    
-
-
+        return words
+        
     def transcribe(self, audio_bytes: bytes) -> str:
         audio = np.frombuffer(audio_bytes, np.int16).astype(np.float32) / 32768.0
         

@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Speaker Transcription</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Inter:wght@400;500;600&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:        #0e0e10;
+    --surface:   #18181c;
+    --border:    #2a2a30;
+    --text:      #e8e8ec;
+    --muted:     #6b6b75;
+    --accent:    #7c6af7;
+    --accent-dim:#3d3578;
+    --red:       #f75a5a;
+    --green:     #4ade80;
+    --mono:      'JetBrains Mono', monospace;
+    --sans:      'Inter', sans-serif;
+
+    /* speaker palette */
+    --s0: #7c6af7; --s0-bg: #1e1a3a;
+    --s1: #f7a25a; --s1-bg: #2e1e0a;
+    --s2: #5af7c2; --s2-bg: #0a2e22;
+    --s3: #f75a9e; --s3-bg: #2e0a1e;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 48px 24px;
+  }
+
+  header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-bottom: 12px;
+  }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--text);
+  }
+
+  h1 span {
+    color: var(--accent);
+  }
+
+  .subtitle {
+    margin-top: 8px;
+    font-size: 14px;
+    color: var(--muted);
+  }
+
+  /* --- recorder card --- */
+  .card {
+    width: 100%;
+    max-width: 680px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 32px;
+    margin-bottom: 24px;
+  }
+
+  /* waveform */
+  #waveform {
+    width: 100%;
+    height: 72px;
+    border-radius: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    margin-bottom: 24px;
+    display: block;
+  }
+
+  /* timer */
+  .timer-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 24px;
+  }
+
+  #timer {
+    font-family: var(--mono);
+    font-size: 32px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: 0.05em;
+  }
+
+  .rec-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+  .rec-dot.active { opacity: 1; animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  /* controls */
+  .controls {
+    display: flex;
+    gap: 12px;
+  }
+
+  .btn {
+    flex: 1;
+    height: 48px;
+    border: none;
+    border-radius: 10px;
+    font-family: var(--sans);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: opacity 0.15s, transform 0.1s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+  .btn:active { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+
+  .btn-record {
+    background: var(--red);
+    color: #fff;
+  }
+  .btn-record.recording {
+    background: #3a1010;
+    color: var(--red);
+    border: 1px solid var(--red);
+  }
+
+  .btn-send {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .btn-clear {
+    flex: 0 0 48px;
+    background: var(--border);
+    color: var(--muted);
+  }
+
+  /* status bar */
+  #status {
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    min-height: 18px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .spinner {
+    width: 12px; height: 12px;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    display: none;
+  }
+  .spinner.active { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* --- transcript --- */
+  .transcript-card {
+    width: 100%;
+    max-width: 680px;
+    display: none;
+  }
+  .transcript-card.visible { display: block; }
+
+  .transcript-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+
+  .transcript-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+
+  .speaker-legend {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .legend-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+  }
+
+  /* turn blocks */
+  .turn {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 20px;
+    animation: fadeUp 0.25s ease both;
+  }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(6px); } }
+
+  .turn-label {
+    flex-shrink: 0;
+    width: 90px;
+    text-align: right;
+  }
+
+  .speaker-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    padding: 3px 8px;
+    border-radius: 20px;
+    white-space: nowrap;
+  }
+
+  .turn-time {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+
+  .turn-text {
+    flex: 1;
+    font-size: 15px;
+    line-height: 1.65;
+    color: var(--text);
+    padding-top: 2px;
+  }
+
+  /* word-level hover */
+  .word {
+    display: inline;
+    border-radius: 3px;
+    padding: 0 1px;
+    cursor: default;
+    transition: background 0.1s;
+  }
+  .word:hover { background: var(--border); }
+  .word[title]:hover::after {
+    content: attr(title);
+    position: fixed;
+    background: #1e1e24;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 99;
+    transform: translateY(-28px);
+  }
+
+  /* raw json toggle */
+  .json-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .json-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+  #raw-json {
+    display: none;
+    margin-top: 16px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    white-space: pre;
+    overflow-x: auto;
+    max-height: 300px;
+  }
+  #raw-json.visible { display: block; }
+
+  @media (max-width: 540px) {
+    .turn { flex-direction: column; gap: 4px; }
+    .turn-label { width: auto; text-align: left; display: flex; align-items: center; gap: 8px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="eyebrow">Speaker Diarization</p>
+  <h1>Who said <span>what</span>.</h1>
+  <p class="subtitle">Record audio, send it, get back a word-level transcript with speaker labels.</p>
+</header>
+
+<!-- recorder -->
+<div class="card">
+  <canvas id="waveform"></canvas>
+
+  <div class="timer-row">
+    <span id="timer">00:00</span>
+    <div class="rec-dot" id="rec-dot"></div>
+  </div>
+
+  <div class="controls">
+    <button class="btn btn-record" id="btn-record">
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><circle cx="7" cy="7" r="5"/></svg>
+      Record
+    </button>
+    <button class="btn btn-send" id="btn-send" disabled>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7H2M8 3l4 4-4 4"/></svg>
+      Send
+    </button>
+    <button class="btn btn-clear" id="btn-clear" title="Clear" disabled>
+      <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 2l10 10M12 2L2 12"/></svg>
+    </button>
+  </div>
+
+  <div id="status">
+    <div class="spinner" id="spinner"></div>
+    <span id="status-text">Ready to record</span>
+  </div>
+</div>
+
+<!-- transcript output -->
+<div class="transcript-card" id="transcript-card">
+  <div class="transcript-header">
+    <span class="transcript-title">Transcript</span>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div class="speaker-legend" id="legend"></div>
+      <button class="json-toggle" id="json-toggle">JSON</button>
+    </div>
+  </div>
+
+  <div class="card" style="padding:24px" id="turns-container"></div>
+
+  <pre id="raw-json"></pre>
+</div>
+
+<script>
+const API_BASE = 'https://localhost:8000';
+
+const SPEAKER_COLORS = [
+  { color: 'var(--s0)', bg: 'var(--s0-bg)' },
+  { color: 'var(--s1)', bg: 'var(--s1-bg)' },
+  { color: 'var(--s2)', bg: 'var(--s2-bg)' },
+  { color: 'var(--s3)', bg: 'var(--s3-bg)' },
+];
+
+// --- state ---
+let mediaRecorder = null;
+let chunks        = [];
+let pcmBuffer     = null;   // final Int16Array
+let isRecording   = false;
+let timerInterval = null;
+let seconds       = 0;
+let audioCtx      = null;
+let analyser      = null;
+let waveAnim      = null;
+
+// --- elements ---
+const btnRecord   = document.getElementById('btn-record');
+const btnSend     = document.getElementById('btn-send');
+const btnClear    = document.getElementById('btn-clear');
+const timerEl     = document.getElementById('timer');
+const recDot      = document.getElementById('rec-dot');
+const spinner     = document.getElementById('spinner');
+const statusText  = document.getElementById('status-text');
+const canvas      = document.getElementById('waveform');
+const ctx2d       = canvas.getContext('2d');
+const transcriptCard = document.getElementById('transcript-card');
+const turnsContainer = document.getElementById('turns-container');
+const legend      = document.getElementById('legend');
+const rawJson     = document.getElementById('raw-json');
+const jsonToggle  = document.getElementById('json-toggle');
+
+// resize canvas
+function resizeCanvas() {
+  canvas.width  = canvas.offsetWidth  * devicePixelRatio;
+  canvas.height = canvas.offsetHeight * devicePixelRatio;
+  ctx2d.scale(devicePixelRatio, devicePixelRatio);
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+drawIdle();
+
+// --- waveform ---
+function drawIdle() {
+  const w = canvas.offsetWidth, h = canvas.offsetHeight;
+  ctx2d.clearRect(0, 0, w, h);
+  ctx2d.strokeStyle = '#2a2a30';
+  ctx2d.lineWidth   = 1;
+  ctx2d.beginPath();
+  ctx2d.moveTo(0, h / 2);
+  ctx2d.lineTo(w, h / 2);
+  ctx2d.stroke();
+}
+
+function drawWave() {
+  if (!analyser) return;
+  const w = canvas.offsetWidth, h = canvas.offsetHeight;
+  const buf = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteTimeDomainData(buf);
+
+  ctx2d.clearRect(0, 0, w, h);
+  ctx2d.strokeStyle = '#7c6af7';
+  ctx2d.lineWidth   = 1.5;
+  ctx2d.beginPath();
+
+  const step = w / buf.length;
+  for (let i = 0; i < buf.length; i++) {
+    const y = (buf[i] / 128.0 - 1) * (h / 2) + h / 2;
+    i === 0 ? ctx2d.moveTo(i * step, y) : ctx2d.lineTo(i * step, y);
+  }
+  ctx2d.stroke();
+  waveAnim = requestAnimationFrame(drawWave);
+}
+
+// --- timer ---
+function startTimer() {
+  seconds = 0;
+  timerEl.textContent = '00:00';
+  timerInterval = setInterval(() => {
+    seconds++;
+    const m = String(Math.floor(seconds / 60)).padStart(2, '0');
+    const s = String(seconds % 60).padStart(2, '0');
+    timerEl.textContent = `${m}:${s}`;
+  }, 1000);
+}
+
+function stopTimer() {
+  clearInterval(timerInterval);
+}
+
+// --- status helpers ---
+function setStatus(msg, loading = false) {
+  statusText.textContent = msg;
+  spinner.classList.toggle('active', loading);
+}
+
+// --- record ---
+btnRecord.addEventListener('click', async () => {
+  if (isRecording) {
+    stopRecording();
+  } else {
+    await startRecording();
+  }
+});
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+    // web audio for waveform
+    audioCtx  = new AudioContext({ sampleRate: 16000 });
+    analyser  = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    audioCtx.createMediaStreamSource(stream).connect(analyser);
+
+    mediaRecorder = new MediaRecorder(stream);
+    chunks = [];
+    mediaRecorder.ondataavailable = e => chunks.push(e.data);
+    mediaRecorder.onstop = async () => {
+      // decode to raw PCM int16
+      const blob    = new Blob(chunks, { type: 'audio/webm' });
+      const arrayBuf = await blob.arrayBuffer();
+      const decoded = await audioCtx.decodeAudioData(arrayBuf);
+      const float32 = decoded.getChannelData(0);
+      const int16   = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+      }
+      pcmBuffer = int16;
+      btnSend.disabled  = false;
+      btnClear.disabled = false;
+      setStatus(`Ready — ${(int16.byteLength / 1024).toFixed(1)} KB PCM`);
+      stream.getTracks().forEach(t => t.stop());
+    };
+
+    mediaRecorder.start();
+    isRecording = true;
+
+    btnRecord.classList.add('recording');
+    btnRecord.innerHTML = `<svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect width="12" height="12" rx="2"/></svg> Stop`;
+    btnSend.disabled  = true;
+    btnClear.disabled = true;
+    recDot.classList.add('active');
+    startTimer();
+    drawWave();
+    setStatus('Recording…');
+  } catch (err) {
+    setStatus('Microphone access denied');
+    console.error(err);
+  }
+}
+
+function stopRecording() {
+  mediaRecorder.stop();
+  isRecording = false;
+  btnRecord.classList.remove('recording');
+  btnRecord.innerHTML = `<svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><circle cx="7" cy="7" r="5"/></svg> Record`;
+  recDot.classList.remove('active');
+  stopTimer();
+  cancelAnimationFrame(waveAnim);
+  drawIdle();
+  setStatus('Processing audio…');
+}
+
+// --- clear ---
+btnClear.addEventListener('click', () => {
+  pcmBuffer = null;
+  btnSend.disabled  = true;
+  btnClear.disabled = true;
+  timerEl.textContent = '00:00';
+  transcriptCard.classList.remove('visible');
+  setStatus('Ready to record');
+  drawIdle();
+});
+
+// --- send ---
+btnSend.addEventListener('click', async () => {
+  if (!pcmBuffer) return;
+
+  btnSend.disabled  = true;
+  btnRecord.disabled = true;
+  setStatus('Uploading…', true);
+
+  try {
+    // POST raw PCM bytes
+    const postRes = await fetch(`${API_BASE}/transcribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: pcmBuffer.buffer
+    });
+
+    if (!postRes.ok) throw new Error(`Upload failed: ${postRes.status}`);
+    const { job_id } = await postRes.json();
+
+    setStatus('Transcribing + diarizing…', true);
+
+    // poll GET /transcribe/:job_id
+    const result = await poll(job_id);
+    renderTranscript(result);
+    setStatus(`Done — ${result.speakers.length} speaker(s) detected`);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+    console.error(err);
+  } finally {
+    btnRecord.disabled  = false;
+    btnSend.disabled    = false;
+  }
+});
+
+async function poll(job_id, interval = 1500, maxAttempts = 200) {
+  for (let i = 0; i < maxAttempts; i++) {
+    await new Promise(r => setTimeout(r, interval));
+    const res = await fetch(`${API_BASE}/transcribe/${job_id}`);
+    if (res.status === 200) return res.json();
+    if (res.status !== 202 && res.status !== 404) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Server error ${res.status}`);
+    }
+  }
+  throw new Error('Timed out waiting for result');
+}
+
+// --- render ---
+function speakerColor(speakerLabel) {
+  const match = speakerLabel.match(/\d+$/);
+  const idx   = match ? parseInt(match[0]) % SPEAKER_COLORS.length : 0;
+  return SPEAKER_COLORS[idx];
+}
+
+function renderTranscript(data) {
+  turnsContainer.innerHTML = '';
+  legend.innerHTML = '';
+  rawJson.textContent = JSON.stringify(data, null, 2);
+
+  // legend from data.speakers
+  data.speakers.forEach(sp => {
+    const c = speakerColor(sp);
+    legend.insertAdjacentHTML('beforeend', `
+      <div class="legend-item">
+        <div class="legend-dot" style="background:${c.color}"></div>
+        <span>${sp}</span>
+      </div>
+    `);
+  });
+
+  // data.text is already "SPEAKER_00 [0.00s]: Hello ...\nSPEAKER_01 [3.20s]: Hi ..."
+  // just parse each line and render
+  data.text.split('\n').forEach(line => {
+    if (!line.trim()) return;
+    // e.g.  SPEAKER_00 [0.00s]: Hello my name is John
+    const match = line.match(/^(\S+)\s+\[([^\]]+)\]:\s*(.*)$/);
+    if (!match) return;
+    const [, speaker, timestamp, text] = match;
+    const c = speakerColor(speaker);
+    turnsContainer.insertAdjacentHTML('beforeend', `
+      <div class="turn">
+        <div class="turn-label">
+          <span class="speaker-tag" style="color:${c.color};background:${c.bg}">${speaker}</span>
+          <div class="turn-time">${timestamp}</div>
+        </div>
+        <div class="turn-text">${text}</div>
+      </div>
+    `);
+  });
+
+  transcriptCard.classList.add('visible');
+}
+
+jsonToggle.addEventListener('click', () => {
+  rawJson.classList.toggle('visible');
+  jsonToggle.textContent = rawJson.classList.contains('visible') ? 'Hide JSON' : 'JSON';
+});
+</script>
+</body>
+</html>

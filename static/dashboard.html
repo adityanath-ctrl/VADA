@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+
+<title>Whisper Monitoring Dashboard</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body class="bg-slate-950 text-white min-h-screen">
+
+<div class="max-w-7xl mx-auto p-8">
+
+    <div class="flex justify-between items-center mb-8">
+        <div>
+            <h1 class="text-4xl font-bold">Whisper Dashboard</h1>
+            <p class="text-slate-400">
+                Real-time Transcription Service Metrics
+            </p>
+        </div>
+
+        <div id="status"
+             class="px-4 py-2 rounded-full bg-green-600">
+            Healthy
+        </div>
+    </div>
+
+    <!-- Metric Cards -->
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+
+        <div class="bg-slate-900 rounded-2xl p-6">
+            <div class="text-slate-400">Connections</div>
+            <div id="connections"
+                 class="text-4xl font-bold mt-2">
+                0
+            </div>
+        </div>
+
+        <div class="bg-slate-900 rounded-2xl p-6">
+            <div class="text-slate-400">Active Jobs</div>
+            <div id="jobs"
+                 class="text-4xl font-bold mt-2">
+                0
+            </div>
+        </div>
+
+        <div class="bg-slate-900 rounded-2xl p-6">
+            <div class="text-slate-400">Queue Size</div>
+            <div id="queue"
+                 class="text-4xl font-bold mt-2">
+                0
+            </div>
+        </div>
+
+        <div class="bg-slate-900 rounded-2xl p-6">
+            <div class="text-slate-400">GPU Utilization</div>
+            <div id="gpu"
+                 class="text-4xl font-bold mt-2">
+                0%
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Charts -->
+
+    <div class="grid lg:grid-cols-2 gap-8">
+
+        <div class="bg-slate-900 p-6 rounded-2xl">
+            <h2 class="text-xl mb-4">
+                CPU Usage %
+            </h2>
+
+            <canvas id="cpuChart"></canvas>
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-2xl">
+            <h2 class="text-xl mb-4">
+                GPU Usage %
+            </h2>
+
+            <canvas id="gpuChart"></canvas>
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-2xl">
+            <h2 class="text-xl mb-4">
+                Queue Traffic
+            </h2>
+
+            <canvas id="queueChart"></canvas>
+        </div>
+
+        <div class="bg-slate-900 p-6 rounded-2xl">
+            <h2 class="text-xl mb-4">
+                Worker Utilization
+            </h2>
+
+            <canvas id="workerChart"></canvas>
+        </div>
+
+    </div>
+
+</div>
+
+<script>
+
+const labels = [];
+
+const cpuData = [];
+const gpuData = [];
+const queueData = [];
+
+function createChart(id,label){
+
+    return new Chart(
+        document.getElementById(id),
+        {
+            type:"line",
+
+            data:{
+                labels:[],
+                datasets:[
+                    {
+                        label,
+                        data:[]
+                    }
+                ]
+            },
+
+            options:{
+                responsive:true,
+                animation:false
+            }
+        }
+    )
+}
+
+const cpuChart = createChart(
+    "cpuChart",
+    "CPU %"
+);
+
+const gpuChart = createChart(
+    "gpuChart",
+    "GPU %"
+);
+
+const queueChart = createChart(
+    "queueChart",
+    "Queue"
+);
+
+const workerChart = new Chart(
+    document.getElementById("workerChart"),
+    {
+        type:"doughnut",
+
+        data:{
+            labels:["Busy","Free"],
+            datasets:[
+                {
+                    data:[0,0]
+                }
+            ]
+        }
+    }
+);
+
+function push(chart,value){
+
+    const now =
+        new Date().toLocaleTimeString();
+
+    chart.data.labels.push(now);
+
+    chart.data.datasets[0].data.push(value);
+
+    if(chart.data.labels.length > 30){
+
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+    }
+
+    chart.update();
+}
+
+async function refresh(){
+
+    try{
+
+        const res =
+            await fetch("/health/metrics");
+
+        const m = await res.json();
+
+        document.getElementById(
+            "connections"
+        ).innerText =
+            m.active_connections;
+
+        document.getElementById(
+            "jobs"
+        ).innerText =
+            m.active_jobs;
+
+        document.getElementById(
+            "queue"
+        ).innerText =
+            m.queue_size;
+
+        document.getElementById(
+            "gpu"
+        ).innerText =
+            m.gpu_utilization + "%";
+
+        push(cpuChart,m.cpu_percent);
+        push(gpuChart,m.gpu_utilization);
+        push(queueChart,m.queue_size);
+
+        workerChart.data.datasets[0].data = [
+            m.workers_busy,
+            m.workers_free
+        ];
+
+        workerChart.update();
+
+        if(m.queue_size > 25){
+            document.getElementById("status")
+                    .innerText = "Busy";
+        }
+
+    }catch(err){
+        console.error(err);
+    }
+}
+
+refresh();
+
+setInterval(
+    refresh,
+    1000
+);
+
+</script>
+
+</body>
+</html>
