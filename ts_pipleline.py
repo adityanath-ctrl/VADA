@@ -1,5 +1,6 @@
 from faster_whisper import WhisperModel
 import numpy as np
+import time
 
 MAX_CUDA_WORKERS=6
 MAX_CPU_WORKERS=4
@@ -95,7 +96,6 @@ class TranscriptionPipeline:
             compression_ratio_threshold=2.4,
             condition_on_previous_text=self.condition_on_previous_text
         )
-
         text = self.process_segments(segments)
         return text
 

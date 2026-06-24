@@ -1,5 +1,5 @@
 import psutil
-from pynvml import *
+from pynvml import *   # type: ignore[import]
 
 nvmlInit()
 

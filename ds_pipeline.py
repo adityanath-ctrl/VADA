@@ -7,8 +7,8 @@ from nemo.collections.asr.models import SortformerEncLabelModel
 
 class DiarizationPipeLine:
 	def __init__(self, variant="nvidia/diar_sortformer_4spk-v1"):
-		self.model = SortformerEncLabelModel.from_pretrained(variant)
-		# self.model = model.cuda()
+		model = SortformerEncLabelModel.from_pretrained(variant)
+		self.model = model.cuda()
 
 	def process_segments(self,segments):
 		output = []

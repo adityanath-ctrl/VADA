@@ -1,11 +1,11 @@
 from faster_whisper import WhisperModel
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from typing import Optional
 import asyncio
-from ts_manager import TranscriptionManager,DiarizationManager, TranscriptionJob, AudioJob
+from ts_manager import TranscriptionManager,DiarizationManager, TranscriptionJob, AudioJob, DiarizationJob
 import uuid
 import json 
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +17,41 @@ import os
 app = FastAPI()
 
 #app.mount("/static", StaticFiles(directory="static"), name="static")
+
+def build_text_with_speakers(words: list) -> str:
+    if not words:
+        return ""
+
+    lines           = []
+    current_speaker = words[0]["speaker"]
+    current_start   = words[0]["start"]
+    current_words   = [words[0]["word"]]
+
+    for w in words[1:]:
+        if w["speaker"] == current_speaker:
+            current_words.append(w["word"])
+        else:
+            lines.append(f"{current_speaker} [{current_start:.2f}s]: {' '.join(current_words)}")
+            current_speaker = w["speaker"]
+            current_start   = w["start"]
+            current_words   = [w["word"]]
+
+    lines.append(f"{current_speaker} [{current_start:.2f}s]: {' '.join(current_words)}")
+    return "\n".join(lines)
+
+
+def merge_words_with_speakers(words: list, speaker_turns: list) -> list:
+    result = []
+    for word in words:
+        word_mid = (word["start"] + word["end"]) / 2
+        speaker = "UNKNOWN"
+        for turn in speaker_turns:
+            if turn["start"] <= word_mid <= turn["end"]:
+                speaker = turn["speaker"]
+                break
+        result.append({**word, "speaker": speaker})
+    return result
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -59,9 +94,9 @@ def build_text_with_speakers(words: list) -> str:
     @deprecated will be removing this as soon as possible 
 """
 
-# @app.get("/")
-# def home():
-#    return FileResponse("static/index.html")
+@app.get("/")
+def home():
+   return FileResponse("static/index.html")
 
 
 @app.get("/dashboard")
@@ -84,8 +119,8 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 """ 
     global manager for managing jobs right now everything is defaulting to default value  
 """
-dmanager = DiarizationManager(num_workers=1)
-manager = TranscriptionManager(device="cpu", compute_type="int8",condition_on_previous_text=False,diarization_manager=dmanager)
+manager = TranscriptionManager(device="cuda", compute_type="float16",condition_on_previous_text=False)
+dmanager = DiarizationManager(num_workers=1, manager=manager)
 
 
 @app.get("/health/live")
@@ -152,6 +187,11 @@ async def shutdown():
         wait=True,
         cancel_futures=True
     )
+    dmanager.executor.shutdown(
+        wait=True,
+        cancel_futures=True
+    )
+
 
 ##### HTTP endpoint 
 
@@ -172,39 +212,53 @@ async def upload_audio(request: Request):
     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16)
     sf.write(tmp_path, audio_np, samplerate=16000, subtype='PCM_16')
 
+    manager.job_events[job_id] = {
+        "asr": asyncio.get_running_loop().create_future(),
+        "diar": asyncio.get_running_loop().create_future()
+    }
+
     await manager.submit_job(AudioJob(
         job_id=job_id,
         audio_buffer=pcm_bytes,
         audio_path=tmp_path
     ))
 
+    await dmanager.submit(DiarizationJob(
+        job_id=job_id,
+        audio_path = tmp_path
+    ))
+
     return {"job_id": job_id, "status": "queued"}
+
 
 @app.get("/transcribe/{job_id}")
 async def get_result(job_id: str):
-    event = None
-    tmp_path = os.path.join(tempfile.gettempdir(), f"{job_id}.wav")
+
     try:
-        event = await asyncio.wait_for(
-            manager.wait_for_result(job_id),
-            timeout=300
+        events = manager.job_events[job_id]
+        print("upper events")
+        words, speaker_turns = await asyncio.gather(
+            events["asr"],
+            events["diar"]
         )
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "Transcription timed out")
+
+        print("events")
+
+        print("we are hitting this endpoint in here", words)
+        merged = merge_words_with_speakers(words, speaker_turns)
+
+        return {
+            "job_id": job_id,
+            "words": merged,
+            "text": build_text_with_speakers(merged),
+            "speakers": list({w["speaker"] for w in merged})
+        }
+
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
     finally:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-
-    if event["type"] == "error":
-        raise HTTPException(500, event["error"])
-
-    words = event["result"]
-    return {
-        "job_id":   job_id,
-        "words":    words,
-        "text":     build_text_with_speakers(words),
-        "speakers": list({w["speaker"] for w in words})
-    }
+        manager.job_events.pop(job_id, None)
 
 
 ##### HTTP endpoint
@@ -225,6 +279,7 @@ async def audio_ws(websocket:WebSocket):
             chunk = await websocket.receive_bytes()
             clientbuffer.extend(chunk)
             
+            print("manager is chunked with chunks in here")
             if len(clientbuffer) >= FLUSH_SIZE:
                 audio_bytes = bytes(clientbuffer)
                 clientbuffer.clear()
@@ -239,3 +294,15 @@ async def audio_ws(websocket:WebSocket):
         print("Client disconnected")
     finally:
         manager.active_d()
+
+
+async def main():
+    await dmanager.start_workers()
+    job_id = str(uuid.uuid4())
+    fut = await dmanager.submit(DiarizationJob(job_id, "meetings.wav"))
+
+    res = await fut
+    print(res)
+
+if __name__ == "__main__":
+    asyncio.run(main())
