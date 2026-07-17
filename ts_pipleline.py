@@ -14,7 +14,7 @@ def format_timestamp(seconds):
 
 
 class TranscriptionPipeline:
-    def __init__(self,model="large-v3-turbo", device="cuda", compute_type="float16", beam_size = 1, 
+    def __init__(self,model="medium", device="cuda", compute_type="float16", beam_size = 1, 
                        no_speech_threshold=0.5, avg_logprob_threshold=-1.0, 
                        condition_on_previous_text=False):
                        

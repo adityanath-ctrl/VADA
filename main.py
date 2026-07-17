@@ -37,7 +37,7 @@ def build_text_with_speakers(words: list) -> str:
             current_words   = [w["word"]]
 
     lines.append(f"{current_speaker} [{current_start:.2f}s]: {' '.join(current_words)}")
-    return "\n".join(lines)
+    return "\n\n".join(lines)
 
 
 def merge_words_with_speakers(words: list, speaker_turns: list) -> list:
@@ -68,6 +68,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 def build_text_with_speakers(words: list) -> str:
     if not words:
         return ""
@@ -94,9 +95,9 @@ def build_text_with_speakers(words: list) -> str:
     @deprecated will be removing this as soon as possible 
 """
 
-@app.get("/")
-def home():
-   return FileResponse("static/index.html")
+#@app.get("/")
+#def home():
+#   return FileResponse("static/index.html")
 
 
 @app.get("/dashboard")
@@ -119,7 +120,7 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 """ 
     global manager for managing jobs right now everything is defaulting to default value  
 """
-manager = TranscriptionManager(device="cuda", compute_type="float16",condition_on_previous_text=False)
+manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
 dmanager = DiarizationManager(num_workers=1, manager=manager)
 
 
@@ -137,7 +138,7 @@ def health():
     qsize = manager.job_queue.qsize()
 
     overloaded = (
-        manager.active_job  >= manager.num_workers and qsize > 10
+        manager.active_jobs  >= manager.num_workers and qsize > 10
     )
 
     if overloaded:
@@ -231,11 +232,16 @@ async def upload_audio(request: Request):
     return {"job_id": job_id, "status": "queued"}
 
 
+
 @app.get("/transcribe/{job_id}")
 async def get_result(job_id: str):
 
     try:
         events = manager.job_events[job_id]
+        
+        if events is None:
+            raise HTTPException(404, "job not found")
+
         print("upper events")
         words, speaker_turns = await asyncio.gather(
             events["asr"],

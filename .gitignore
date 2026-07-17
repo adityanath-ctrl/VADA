@@ -38,3 +38,6 @@ models/
 *.mp3
 
 aenv/
+
+
+__pycache__/

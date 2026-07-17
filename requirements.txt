@@ -11,7 +11,7 @@ fastapi==0.128.8
 faster-whisper==1.2.1
 filelock==3.19.1
 flatbuffers==25.12.19
-fsspec==2025.10.0
+#fsspec==2025.10.0
 h11==0.16.0
 hf-xet==1.5.0
 httpcore==1.0.9
