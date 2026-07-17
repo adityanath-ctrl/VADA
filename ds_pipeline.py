@@ -6,29 +6,49 @@
 from nemo.collections.asr.models import SortformerEncLabelModel
 
 class DiarizationPipeLine:
-	def __init__(self, variant="nvidia/diar_sortformer_4spk-v1"):
-		model = SortformerEncLabelModel.from_pretrained(variant)
-		self.model = model.cuda()
 
-	def process_segments(self,segments):
-		output = []
+    def __init__(
+        self,
+        variant="nvidia/diar_streaming_sortformer_4spk-v2"
+    ):
+        self.model = SortformerEncLabelModel.from_pretrained(
+            variant
+        )
 
-		for seg in segments:
-			start, end, speaker = seg.split()
-			output.append({
-				"start": float(start),
-				"end": float(end),
-				"speaker": speaker,
-				"duration": float(end) - float(start)
-			})
+        self.model.eval()
 
-		return {"segments": output}
+        # Streaming configuration
+        self.model.sortformer_modules.chunk_len = 240
+        self.model.sortformer_modules.chunk_right_context = 20
+        self.model.sortformer_modules.fifo_len = 20
+        self.model.sortformer_modules.spkcache_update_period = 500
+        self.model.sortformer_modules._check_streaming_parameters()
 
-	def sort_segments(self, segments):
-		return sorted(segments, key=lambda x: x["start"])
+    def process_segments(self, segments):
+        output = []
 
-	def diarize(self,path: list[str]):
-		segments = self.model.diarize(path)[0]
-		json_ = self.process_segments(segments)
-		return self.sort_segments(json_["segments"])
+        for seg in segments:
+            start, end, speaker = seg.split()
+            output.append({
+                "start": float(start),
+                "end": float(end),
+                "speaker": speaker,
+                "duration": float(end) - float(start)
+            })
+        return output
 
+    def sort_segments(self, segments):
+        return sorted(
+            segments,
+            key=lambda x: x["start"]
+        )
+
+    def diarize(self, path: str):
+        predicted_segments = self.model.diarize(
+            audio=[path],
+            batch_size=1
+        )
+        segments = predicted_segments[0]
+        segments = self.process_segments(segments)
+        return self.sort_segments(segments)
+		

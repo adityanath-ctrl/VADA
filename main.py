@@ -13,8 +13,11 @@ from metrics.system import CPU, GPU
 import soundfile as sf
 import tempfile
 import os 
+import logging 
 
 app = FastAPI()
+print("MAIN FILE LOADED", flush=True)
+logger = logging.getLogger("uvicorn.error")
 
 #app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -120,7 +123,7 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 """ 
     global manager for managing jobs right now everything is defaulting to default value  
 """
-manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
+manager = TranscriptionManager(device="cpu", compute_type="int8",condition_on_previous_text=False)
 dmanager = DiarizationManager(num_workers=1, manager=manager)
 
 
@@ -200,6 +203,8 @@ async def shutdown():
 async def upload_audio(request: Request):
     pcm_bytes = await request.body()
 
+    logger.info("got the pcm bytes in here")
+
     if len(pcm_bytes) == 0:
         raise HTTPException(400, "Empty audio body")
     if len(pcm_bytes) % 2 != 0:
@@ -208,7 +213,7 @@ async def upload_audio(request: Request):
     job_id = str(uuid.uuid4())
 
     fd, tmp_path = tempfile.mkstemp(suffix='.wav')
-    os.close(fd)  # close the fd, soundfile will open it itself
+    os.close(fd)
 
     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16)
     sf.write(tmp_path, audio_np, samplerate=16000, subtype='PCM_16')
@@ -229,28 +234,27 @@ async def upload_audio(request: Request):
         audio_path = tmp_path
     ))
 
+    logger.info("SUbmitted both jobs in here")
+
     return {"job_id": job_id, "status": "queued"}
 
 
 
 @app.get("/transcribe/{job_id}")
 async def get_result(job_id: str):
-
     try:
         events = manager.job_events[job_id]
         
         if events is None:
             raise HTTPException(404, "job not found")
 
-        print("upper events")
+        logger.info("got the events in here")
         words, speaker_turns = await asyncio.gather(
             events["asr"],
             events["diar"]
         )
 
-        print("events")
-
-        print("we are hitting this endpoint in here", words)
+        logger.info("we are hitting this endpoint in here %s", words)
         merged = merge_words_with_speakers(words, speaker_turns)
 
         return {
@@ -265,11 +269,10 @@ async def get_result(job_id: str):
 
     finally:
         manager.job_events.pop(job_id, None)
+        logger.info("popping the events in here and printing the event size in here %s", manager.job_events)
 
 
 ##### HTTP endpoint
-
-
 
 
 @app.websocket("/ws")

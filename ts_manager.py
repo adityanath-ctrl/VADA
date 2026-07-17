@@ -23,7 +23,7 @@ class DiarizationJob:
 
 
 class DiarizationManager:
-    def __init__(self,model="nvidia/diar_sortformer_4spk-v1", num_workers=1, manager:'TranscriptionManager' = None):
+    def __init__(self,model="nvidia/diar_streaming_sortformer_4spk-v2", num_workers=1, manager:'TranscriptionManager' = None):
         self.model = ds_pipeline.DiarizationPipeLine(variant=model)
         self.queue = asyncio.Queue(maxsize=20)
         self.executor = ThreadPoolExecutor(max_workers=num_workers)
@@ -65,7 +65,7 @@ class DiarizationManager:
 
 
 class TranscriptionManager:
-    def __init__(self,model_name="large-v3-turbo",num_workers = 6,
+    def __init__(self,model_name="tiny",num_workers = 6,
                       device="cuda", compute_type='float16',
                       queue_size=50,condition_on_previous_text=False
         ):
