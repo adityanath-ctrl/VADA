@@ -3,11 +3,14 @@ import ds_pipeline
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+import time
+
 
 @dataclass
 class TranscriptionJob:
     audio_buffer: bytes
     websocket: any 
+    ws_lock: asyncio.Lock
 
 @dataclass
 class AudioJob:
@@ -23,7 +26,7 @@ class DiarizationJob:
 
 
 class DiarizationManager:
-    def __init__(self,model="nvidia/diar_sortformer_4spk-v1", num_workers=1, manager:'TranscriptionManager' = None):
+    def __init__(self,model="nvidia/diar_streaming_sortformer_4spk-v2", num_workers=1, manager:'TranscriptionManager' = None):
         self.model = ds_pipeline.DiarizationPipeLine(variant=model)
         self.queue = asyncio.Queue(maxsize=20)
         self.executor = ThreadPoolExecutor(max_workers=num_workers)
@@ -51,21 +54,33 @@ class DiarizationManager:
                     job.audio_path
                 )
                 
-                print("this is the diarization result in here", result)
                 future = self.manager.job_events[job.job_id]["diar"]
                 future.set_result(result)
+            
             except Exception as e:
-                future.set_exception(e)
+            
                 print("Diarization Worker error in here", str(e))
+                future = (
+                    self.manager.job_events
+                    .get(job.job_id, {})
+                    .get("diar")
+                )
+                
+                if future and not future.done():
+                    future.set_exception(e)
+
             finally:
                 self.queue.task_done()
+
 
     async def submit(self, job: DiarizationJob) -> asyncio.Future:
         await self.queue.put(job)
 
 
+
+
 class TranscriptionManager:
-    def __init__(self,model_name="large-v3-turbo",num_workers = 6,
+    def __init__(self,model_name="medium",num_workers = 4,
                       device="cuda", compute_type='float16',
                       queue_size=50,condition_on_previous_text=False
         ):
@@ -105,15 +120,6 @@ class TranscriptionManager:
     async def submit_job(self, job):
         await self.job_queue.put(job)
 
-    # async def wait_for_result(self, job_id: str):
-    #     event = self.job_events.get(job_id)
-    #     if not event:
-    #         return None 
-
-    #     result = await event.get()
-    #     del self.job_events[job_id]
-    #     return result
-
     def attach_full_pipeline(self,pipeline: ts_pipleline.TranscriptionPipeline):
         self.pipeline = pipeline
 
@@ -137,17 +143,17 @@ class TranscriptionManager:
                         job.audio_buffer
                     )
 
-                    if words:
-                        future = self.job_events[job.job_id]["asr"]
-                        if future:
-                            future.set_result(words)
+                    future = self.job_events[job.job_id]["asr"]
+                    if future and not future.done():
+                        future.set_result(words  or [])
                 
                 else:
                     text = await loop.run_in_executor(
                         self.executor,
                         self.pipeline.transcribe,
                         job.audio_buffer
-                    )   
+                    )
+
 
                     if text:
                         await job.websocket.send_json({
@@ -155,9 +161,19 @@ class TranscriptionManager:
                             "text": text
                         })
 
+
             except Exception as e:
                 print("worker error ", str(e))
-            
+                if isinstance(job, AudioJob):
+                    future = (
+                        self.job_events
+                        .get(job.job_id,{})
+                        .get("asr")
+                    )
+
+                    if future and not future.done():
+                        future.set_exception(e)
+
             finally:
                 if job is not None:
                     self.active_jobs -= 1

@@ -2,8 +2,7 @@ from faster_whisper import WhisperModel
 import numpy as np
 import time
 
-MAX_CUDA_WORKERS=6
-MAX_CPU_WORKERS=4
+MAX_CUDA_WORKERS=4
 
 def format_timestamp(seconds):
     h = int(seconds // 3600)
@@ -18,7 +17,7 @@ class TranscriptionPipeline:
                        no_speech_threshold=0.5, avg_logprob_threshold=-1.0, 
                        condition_on_previous_text=False):
                        
-        self.model = WhisperModel(model, device=device, compute_type=compute_type,num_workers=MAX_CUDA_WORKERS,cpu_threads=MAX_CPU_WORKERS)
+        self.model = WhisperModel(model, device=device, compute_type=compute_type,num_workers=MAX_CUDA_WORKERS)
 
         self.vad_filter = True
         self.beam_size = beam_size

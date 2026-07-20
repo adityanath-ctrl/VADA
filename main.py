@@ -1,6 +1,6 @@
 from faster_whisper import WhisperModel
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from typing import Optional
@@ -130,6 +130,16 @@ def liveness():
 
 
 
+async def monitor():
+    loop = asyncio.get_running_loop()
+
+    while True:
+        start = loop.time()
+        await asyncio.sleep(1)
+        delay = loop.time() - start - 1
+        print(f"Loop delay: {delay:.3f}s")
+
+
 """
     health check for amazon load balancer for checking the system load 
 """
@@ -228,7 +238,8 @@ async def upload_audio(request: Request):
         job_id=job_id,
         audio_path = tmp_path
     ))
-
+    
+    print("[INFO]: submitted the both jobs in here")
     return {"job_id": job_id, "status": "queued"}
 
 
@@ -242,13 +253,12 @@ async def get_result(job_id: str):
         if events is None:
             raise HTTPException(404, "job not found")
 
-        print("upper events")
+        print("upper events", events)
         words, speaker_turns = await asyncio.gather(
             events["asr"],
             events["diar"]
         )
 
-        print("events")
 
         print("we are hitting this endpoint in here", words)
         merged = merge_words_with_speakers(words, speaker_turns)
@@ -264,7 +274,18 @@ async def get_result(job_id: str):
         raise HTTPException(500, str(e))
 
     finally:
-        manager.job_events.pop(job_id, None)
+        events = manager.job_events.pop(job_id)
+        if events:
+            asr_done = events["asr"].done()
+            diar_done = events["diar"].done()
+
+            if asr_done and diar_done:
+                manager.job_events.pop(
+                    job_id, 
+                    None
+                )
+
+        print("[INFO] manager is shutting down", manager.job_events)
 
 
 ##### HTTP endpoint
@@ -279,36 +300,28 @@ async def audio_ws(websocket:WebSocket):
 
     """will soon be deprecated and we will use the hypothesis buffer"""
     clientbuffer = bytearray()
-    
+    ws_lock = asyncio.Lock()
+
     try:
         while True:
             chunk = await websocket.receive_bytes()
             clientbuffer.extend(chunk)
             
-            print("manager is chunked with chunks in here")
             if len(clientbuffer) >= FLUSH_SIZE:
                 audio_bytes = bytes(clientbuffer)
                 clientbuffer.clear()
                 
                 job = TranscriptionJob(
                         audio_buffer=audio_bytes,
-                        websocket=websocket
+                        websocket=websocket,
+                        ws_lock = ws_lock
                 )
                 await manager.submit_job(job)
 
     except WebSocketDisconnect as e:
         print("Client disconnected")
+
     finally:
         manager.active_d()
 
 
-async def main():
-    await dmanager.start_workers()
-    job_id = str(uuid.uuid4())
-    fut = await dmanager.submit(DiarizationJob(job_id, "meetings.wav"))
-
-    res = await fut
-    print(res)
-
-if __name__ == "__main__":
-    asyncio.run(main())
