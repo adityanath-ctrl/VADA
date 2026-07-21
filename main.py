@@ -253,14 +253,12 @@ async def get_result(job_id: str):
         if events is None:
             raise HTTPException(404, "job not found")
 
-        print("upper events", events)
         words, speaker_turns = await asyncio.gather(
             events["asr"],
             events["diar"]
         )
 
 
-        print("we are hitting this endpoint in here", words)
         merged = merge_words_with_speakers(words, speaker_turns)
 
         return {

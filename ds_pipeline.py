@@ -3,6 +3,7 @@
     like the SortFormer for performance critical 
     issue in here we are using SortFormer in here 
 """
+
 from nemo.collections.asr.models import SortformerEncLabelModel
 
 class DiarizationPipeLine:
@@ -41,4 +42,8 @@ class DiarizationPipeLine:
         segments = self.model.diarize(path)[0]
         json_ = self.process_segments(segments)
         return self.sort_segments(json_["segments"])
+
+
+
+
 

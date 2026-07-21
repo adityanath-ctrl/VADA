@@ -58,8 +58,6 @@ class DiarizationManager:
                 future.set_result(result)
             
             except Exception as e:
-            
-                print("Diarization Worker error in here", str(e))
                 future = (
                     self.manager.job_events
                     .get(job.job_id, {})

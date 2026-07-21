@@ -7,7 +7,6 @@ from .models import Job
 class RedisJobStore:
 
     async def create(self, j: Job):
-
         await redis.hset(
             job(j.id),
             mapping={
@@ -21,8 +20,8 @@ class RedisJobStore:
         await redis.expire(job(j.id), 3600)
 
 
-    async def get(self, job_id: str):
 
+    async def get(self, job_id: str):
         data = await redis.hgetall(job(job_id))
 
         if not data:
@@ -31,8 +30,8 @@ class RedisJobStore:
         return Job(**data)
 
 
-    async def update(self, j: Job):
 
+    async def update(self, j: Job):
         await redis.hset(
             job(j.id),
             mapping={
@@ -43,8 +42,10 @@ class RedisJobStore:
         )
 
 
+
     async def delete(self, job_id: str):
         await redis.delete(job(job_id))
+
 
 
 
