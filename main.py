@@ -12,7 +12,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from metrics.system import CPU, GPU
 import soundfile as sf
 import tempfile
-import os 
+import os
+from cache.redis import redis
+import cache.keys as cache_keys
 
 app = FastAPI()
 
@@ -121,7 +123,7 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
     global manager for managing jobs right now everything is defaulting to default value  
 """
 manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
-dmanager = DiarizationManager(num_workers=1, manager=manager)
+dmanager = DiarizationManager(num_workers=1)
 
 
 @app.get("/health/live")
@@ -223,11 +225,6 @@ async def upload_audio(request: Request):
     audio_np = np.frombuffer(pcm_bytes, dtype=np.int16)
     sf.write(tmp_path, audio_np, samplerate=16000, subtype='PCM_16')
 
-    manager.job_events[job_id] = {
-        "asr": asyncio.get_running_loop().create_future(),
-        "diar": asyncio.get_running_loop().create_future()
-    }
-
     await manager.submit_job(AudioJob(
         job_id=job_id,
         audio_buffer=pcm_bytes,
@@ -236,54 +233,60 @@ async def upload_audio(request: Request):
 
     await dmanager.submit(DiarizationJob(
         job_id=job_id,
-        audio_path = tmp_path
+        audio_path=tmp_path
     ))
-    
-    print("[INFO]: submitted the both jobs in here")
+
+    print("[INFO]: submitted both jobs")
     return {"job_id": job_id, "status": "queued"}
 
 
 
 @app.get("/transcribe/{job_id}")
 async def get_result(job_id: str):
+    """
+    Poll Redis until both ASR words and diarization speaker_turns are ready,
+    then merge and return.  Works across any number of worker processes.
+    """
+    POLL_TIMEOUT   = 120   # seconds
+    POLL_INTERVAL  = 0.25  # initial back-off
+    POLL_MAX_SLEEP = 4.0   # back-off ceiling
 
-    try:
-        events = manager.job_events[job_id]
-        
-        if events is None:
-            raise HTTPException(404, "job not found")
+    elapsed  = 0.0
+    interval = POLL_INTERVAL
 
-        words, speaker_turns = await asyncio.gather(
-            events["asr"],
-            events["diar"]
+    while elapsed < POLL_TIMEOUT:
+        asr_raw, diar_raw = await asyncio.gather(
+            redis.get(cache_keys.asr_result(job_id)),
+            redis.get(cache_keys.diar_result(job_id)),
         )
 
+        if asr_raw is not None and diar_raw is not None:
+            try:
+                words         = json.loads(asr_raw)
+                speaker_turns = json.loads(diar_raw)
+            except json.JSONDecodeError as e:
+                raise HTTPException(500, f"Corrupt cache data: {e}")
+            break
 
-        merged = merge_words_with_speakers(words, speaker_turns)
+        await asyncio.sleep(interval)
+        elapsed  += interval
+        interval  = min(interval * 1.5, POLL_MAX_SLEEP)
+    else:
+        raise HTTPException(504, "Timed out waiting for transcription result")
 
-        return {
-            "job_id": job_id,
-            "words": merged,
-            "text": build_text_with_speakers(merged),
-            "speakers": list({w["speaker"] for w in merged})
-        }
+    merged = merge_words_with_speakers(words, speaker_turns)
 
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    await asyncio.gather(
+        redis.delete(cache_keys.asr_result(job_id)),
+        redis.delete(cache_keys.diar_result(job_id)),
+    )
 
-    finally:
-        events = manager.job_events.pop(job_id)
-        if events:
-            asr_done = events["asr"].done()
-            diar_done = events["diar"].done()
-
-            if asr_done and diar_done:
-                manager.job_events.pop(
-                    job_id, 
-                    None
-                )
-
-        print("[INFO] manager is shutting down", manager.job_events)
+    return {
+        "job_id":   job_id,
+        "words":    merged,
+        "text":     build_text_with_speakers(merged),
+        "speakers": list({w["speaker"] for w in merged}),
+    }
 
 
 ##### HTTP endpoint
