@@ -123,8 +123,19 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 """ 
     global manager for managing jobs right now everything is defaulting to default value  
 """
-manager = TranscriptionManager(device="cpu", compute_type="int8",condition_on_previous_text=False)
-dmanager = DiarizationManager(num_workers=1, manager=manager)
+
+manager = TranscriptionManager(
+    model_name="nvidia/parakeet-tdt-0.6b-v3",
+    device="cpu",                             
+    max_batch_size=16,                         
+    max_wait_ms=40,
+    queue_size=50
+)
+
+dmanager = DiarizationManager(
+    num_workers=1,
+    manager=manager
+)
 
 
 @app.get("/health/live")
@@ -288,7 +299,6 @@ async def audio_ws(websocket:WebSocket):
             chunk = await websocket.receive_bytes()
             clientbuffer.extend(chunk)
             
-            print("manager is chunked with chunks in here")
             if len(clientbuffer) >= FLUSH_SIZE:
                 audio_bytes = bytes(clientbuffer)
                 clientbuffer.clear()
