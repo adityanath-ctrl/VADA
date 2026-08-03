@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 from fastapi import WebSocket
 from enginev1.prkt import BatchedTranscriptionEngine
+import time
 
 
 @dataclass
@@ -33,6 +34,7 @@ class StreamingWorker:
             print(
                 f"[Worker] Batch size: {len(batch)} | Queue left: {self.queue.qsize()}"
             )
+            start = time.perf_counter()
 
             try:
                 async with self.lock:
@@ -41,7 +43,9 @@ class StreamingWorker:
                         audios,
                         len(audios),
                     )
-
+                
+                end = time.perf_counter()
+                print(f"Time spent is {end - start}")
                 await self._publish_results(batch, results)
 
             except Exception as e:
@@ -53,6 +57,8 @@ class StreamingWorker:
 
     async def submit(self, job: AudioJob):
         await self.queue.put(job)
+
+
 
     async def _collect_batch(self) -> list[AudioJob]:
 
@@ -84,6 +90,8 @@ class StreamingWorker:
             pass
 
         return batch
+
+    
 
     async def _publish_results(self, batch, results):
 

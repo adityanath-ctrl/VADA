@@ -31,12 +31,12 @@ class LongJobWorker:
         print("Long job Worker started")
 
         while True:
-
             try:
                 _, job_id = await redis.brpop("transcription_jobs")
                 await self.process(job_id)
             except Exception as e:
                 print(f"[Worker error] {e}")
+                await asyncio.sleep(5)
 
 
     async def process(self, job_id: str):
