@@ -7,6 +7,7 @@ import asyncio
 import torch
 from enginev1.ds_pipeline import DiarizationPipeLine
 from workers.streaming_worker import StreamingWorker
+from workers.long_job_worker import LongJobWorker
 import uuid
 import os
 from cache.redis import redis
@@ -38,21 +39,27 @@ async def lifespan(app: FastAPI):
 	model = BatchedTranscriptionEngine()
 	diarizer = DiarizationPipeLine()
 	streaming_worker = StreamingWorker(model,audio_queue)
+	long_job = LongJobWorker(redis,model,diarizer)
 
 	worker_task = asyncio.create_task(streaming_worker.run())
+	long_task = asyncio.create_task(long_job.run())
+	
 	app.state.model = model
 	app.state.diarizer = diarizer
 	app.state.worker_task = worker_task
 	app.state.streaming_worker = streaming_worker
+
 
 	print("Model loaded....")
 	yield 
 
 	print("shutting down")
 	worker_task.cancel()
+	long_task.cancel()
 
 	try:
 		await worker_task
+		await long_task
 	except asyncio.CancelledError:
 		pass
 
