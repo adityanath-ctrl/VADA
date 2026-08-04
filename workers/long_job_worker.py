@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 from utils import convert_to_wav
 from enginev1.ds_pipeline import DiarizationPipeLine
 from workers.streaming_worker import StreamingWorker
@@ -119,22 +120,33 @@ class LongJobWorker:
         webm_path = job["path"]
         wav_path = webm_path.replace(".webm", ".wav")
 
-        await self.update_status(job_id, status="processing", stage="converting", progress=5)
-        await asyncio.to_thread(convert_to_wav, webm_path, wav_path)
+        try:
+            await self.update_status(job_id, status="processing", stage="converting", progress=5)
+            await asyncio.to_thread(convert_to_wav, webm_path, wav_path)
 
-        await self.update_status(job_id, stage="diarization", progress=20)
+            await self.update_status(job_id, stage="diarization", progress=20)
 
-        speakers = await asyncio.to_thread(self.diarizer.diarize, wav_path)
+            speakers = await asyncio.to_thread(self.diarizer.diarize, wav_path)
 
-        await self.update_status(job_id, stage="transcription", progress=55)
-        transcript_words = await self._transcribe_via_streaming(wav_path)
+            await self.update_status(job_id, stage="transcription", progress=55)
+            transcript_words = await self._transcribe_via_streaming(wav_path)
 
-        await self.update_status(job_id, stage="merging", progress=90)
+            await self.update_status(job_id, stage="merging", progress=90)
 
-        merged = merge_words_with_speakers(transcript_words, speakers)
+            merged = merge_words_with_speakers(transcript_words, speakers)
 
-        await self.redis.set(f"job:{job_id}:result", json.dumps(merged))
-        await self.update_status(job_id, status="completed", stage="finished", progress=100)
+            await self.redis.set(f"job:{job_id}:result", json.dumps(merged))
+            await self.update_status(job_id, status="completed", stage="finished", progress=100)
+        finally:
+            
+            for path in [webm_path, wav_path]:
+                try:
+                    if os.path.exists(path):
+                        os.remove(path)
+                        print(f"[Deleted] {path}")
+
+                except Exception as e:
+                    print(f" failed deletion {path}: {e}")
 
     async def _transcribe_via_streaming(self, wav_path):
         hyp = await self.streaming_worker.transcribe_file(
