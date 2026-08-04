@@ -17,16 +17,18 @@ class BatchedTranscriptionEngine:
 
 		self.model.eval()
 
+	def transcribe_file(self, path: str):
 
-	def transcribe_file(self,path: str):
-		with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+		with torch.inference_mode():
+
 			results = self.model.transcribe(
 				audio=[path],
 				batch_size=1,
-				return_hypothesis=True,
 				timestamps=True,
+				num_workers=0,
 			)
-			return results[0]
+
+		return results[0]
 
 	def transcribe_stream(self, audios,batch_size: int):
 		with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):

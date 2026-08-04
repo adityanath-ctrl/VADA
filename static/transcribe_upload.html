@@ -187,6 +187,24 @@
   .spinner.active { display: block; }
   @keyframes spin { to { transform: rotate(360deg); } }
 
+  /* progress bar */
+  #progress-track {
+    margin-top: 12px;
+    height: 4px;
+    width: 100%;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    display: none;
+  }
+  #progress-track.active { display: block; }
+  #progress-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 0.3s ease;
+  }
+
   /* --- transcript --- */
   .transcript-card {
     width: 100%;
@@ -366,6 +384,7 @@
     <div class="spinner" id="spinner"></div>
     <span id="status-text">Ready to record</span>
   </div>
+  <div id="progress-track"><div id="progress-fill"></div></div>
 </div>
 
 <!-- transcript output -->
@@ -384,7 +403,9 @@
 </div>
 
 <script>
-const API_BASE = 'https://localhost:8000';
+// Same-origin by default since this page is served by the FastAPI app itself
+// (static/index.html). Override if you're serving this file separately.
+const API_BASE = '';
 
 const SPEAKER_COLORS = [
   { color: 'var(--s0)', bg: 'var(--s0-bg)' },
@@ -396,7 +417,7 @@ const SPEAKER_COLORS = [
 // --- state ---
 let mediaRecorder = null;
 let chunks        = [];
-let pcmBuffer     = null;   // final Int16Array
+let recordedBlob  = null;   // audio/webm blob sent to the server as-is
 let isRecording   = false;
 let timerInterval = null;
 let seconds       = 0;
@@ -419,6 +440,8 @@ const turnsContainer = document.getElementById('turns-container');
 const legend      = document.getElementById('legend');
 const rawJson     = document.getElementById('raw-json');
 const jsonToggle  = document.getElementById('json-toggle');
+const progressTrack = document.getElementById('progress-track');
+const progressFill  = document.getElementById('progress-fill');
 
 // resize canvas
 function resizeCanvas() {
@@ -430,7 +453,7 @@ resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 drawIdle();
 
-// --- waveform ---
+// --- waveform (visual only, independent of what gets uploaded) ---
 function drawIdle() {
   const w = canvas.offsetWidth, h = canvas.offsetHeight;
   ctx2d.clearRect(0, 0, w, h);
@@ -484,6 +507,15 @@ function setStatus(msg, loading = false) {
   spinner.classList.toggle('active', loading);
 }
 
+function setProgress(pct) {
+  if (pct == null) {
+    progressTrack.classList.remove('active');
+    return;
+  }
+  progressTrack.classList.add('active');
+  progressFill.style.width = `${pct}%`;
+}
+
 // --- record ---
 btnRecord.addEventListener('click', async () => {
   if (isRecording) {
@@ -497,29 +529,23 @@ async function startRecording() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-    // web audio for waveform
-    audioCtx  = new AudioContext({ sampleRate: 16000 });
+    // web audio, waveform display only -- not used for the uploaded file
+    audioCtx  = new AudioContext();
     analyser  = audioCtx.createAnalyser();
     analyser.fftSize = 1024;
     audioCtx.createMediaStreamSource(stream).connect(analyser);
 
+    // Record straight to webm/opus and upload that blob as-is.
+    // /jobs/transcribe takes an UploadFile and converts it server-side
+    // (convert_to_wav), so no client-side PCM decoding is needed.
     mediaRecorder = new MediaRecorder(stream);
     chunks = [];
     mediaRecorder.ondataavailable = e => chunks.push(e.data);
-    mediaRecorder.onstop = async () => {
-      // decode to raw PCM int16
-      const blob    = new Blob(chunks, { type: 'audio/webm' });
-      const arrayBuf = await blob.arrayBuffer();
-      const decoded = await audioCtx.decodeAudioData(arrayBuf);
-      const float32 = decoded.getChannelData(0);
-      const int16   = new Int16Array(float32.length);
-      for (let i = 0; i < float32.length; i++) {
-        int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
-      }
-      pcmBuffer = int16;
+    mediaRecorder.onstop = () => {
+      recordedBlob = new Blob(chunks, { type: 'audio/webm' });
       btnSend.disabled  = false;
       btnClear.disabled = false;
-      setStatus(`Ready — ${(int16.byteLength / 1024).toFixed(1)} KB PCM`);
+      setStatus(`Ready — ${(recordedBlob.size / 1024).toFixed(1)} KB`);
       stream.getTracks().forEach(t => t.stop());
     };
 
@@ -554,41 +580,60 @@ function stopRecording() {
 
 // --- clear ---
 btnClear.addEventListener('click', () => {
-  pcmBuffer = null;
+  recordedBlob = null;
   btnSend.disabled  = true;
   btnClear.disabled = true;
   timerEl.textContent = '00:00';
   transcriptCard.classList.remove('visible');
+  setProgress(null);
   setStatus('Ready to record');
   drawIdle();
 });
 
 // --- send ---
 btnSend.addEventListener('click', async () => {
-  if (!pcmBuffer) return;
+  if (!recordedBlob) return;
 
   btnSend.disabled  = true;
   btnRecord.disabled = true;
   setStatus('Uploading…', true);
 
   try {
-    // POST raw PCM bytes
-    const postRes = await fetch(`${API_BASE}/transcribe`, {
+    // POST /jobs/transcribe expects multipart/form-data with an audio file,
+    // matching `file: UploadFile = File(...)` on the backend.
+    const form = new FormData();
+    form.append('file', recordedBlob, 'recording.webm');
+
+    const postRes = await fetch(`${API_BASE}/jobs/transcribe`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: pcmBuffer.buffer
+      body: form
     });
 
-    if (!postRes.ok) throw new Error(`Upload failed: ${postRes.status}`);
+    if (!postRes.ok) {
+      const err = await postRes.json().catch(() => ({}));
+      throw new Error(err.detail || `Upload failed: ${postRes.status}`);
+    }
     const { job_id } = await postRes.json();
 
-    setStatus('Transcribing + diarizing…', true);
+    setStatus('Queued…', true);
+    await pollStatus(job_id);
 
-    // poll GET /transcribe/:job_id
-    const result = await poll(job_id);
-    renderTranscript(result);
-    setStatus(`Done — ${result.speakers.length} speaker(s) detected`);
+    setStatus('Fetching result…', true);
+    const resultRes = await fetch(`${API_BASE}/jobs/${job_id}/result`);
+    if (!resultRes.ok) {
+      const err = await resultRes.json().catch(() => ({}));
+      throw new Error(err.detail || `Result fetch failed: ${resultRes.status}`);
+    }
+    const words = await resultRes.json();
+
+    const turns = groupIntoTurns(words);
+    renderTranscript(words, turns);
+
+    const speakerCount = new Set(words.map(w => w.speaker)).size;
+    setProgress(null);
+    setStatus(`Done — ${speakerCount} speaker(s) detected`);
   } catch (err) {
+    setProgress(null);
     setStatus(`Error: ${err.message}`);
     console.error(err);
   } finally {
@@ -597,33 +642,70 @@ btnSend.addEventListener('click', async () => {
   }
 });
 
-async function poll(job_id, interval = 1500, maxAttempts = 200) {
+// Polls GET /jobs/{job_id} until status is "completed" (or throws on "failed").
+// Updates the progress bar from the job's own progress field as it goes.
+async function pollStatus(job_id, interval = 1200, maxAttempts = 300) {
   for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, interval));
-    const res = await fetch(`${API_BASE}/transcribe/${job_id}`);
-    if (res.status === 200) return res.json();
-    if (res.status !== 202 && res.status !== 404) {
+    const res = await fetch(`${API_BASE}/jobs/${job_id}`);
+    if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Server error ${res.status}`);
+      throw new Error(err.detail || `Status check failed: ${res.status}`);
     }
+    const job = await res.json();
+
+    setProgress(job.progress);
+    setStatus(`${job.stage || job.status}…`, true);
+
+    if (job.status === 'completed') return job;
+    if (job.status === 'failed') throw new Error(job.error || 'Transcription failed');
+
+    await new Promise(r => setTimeout(r, interval));
   }
   throw new Error('Timed out waiting for result');
 }
 
 // --- render ---
+// Backend result is a flat list of merged word objects:
+//   { word (or text), start, end, speaker }
+// Group consecutive same-speaker words into display turns.
+function groupIntoTurns(words) {
+  const turns = [];
+  for (const w of words) {
+    const last = turns[turns.length - 1];
+    if (last && last.speaker === w.speaker) {
+      last.words.push(w);
+      last.end = w.end;
+    } else {
+      turns.push({ speaker: w.speaker, start: w.start, end: w.end, words: [w] });
+    }
+  }
+  return turns;
+}
+
 function speakerColor(speakerLabel) {
-  const match = speakerLabel.match(/\d+$/);
+  const match = String(speakerLabel).match(/\d+$/);
   const idx   = match ? parseInt(match[0]) % SPEAKER_COLORS.length : 0;
   return SPEAKER_COLORS[idx];
 }
 
-function renderTranscript(data) {
+function fmtTime(s) {
+  if (s == null) return '';
+  const m = Math.floor(s / 60);
+  const sec = (s % 60).toFixed(1);
+  return `${m}:${sec.padStart(4, '0')}`;
+}
+
+function wordText(w) {
+  return (w.word ?? w.text ?? '').toString();
+}
+
+function renderTranscript(words, turns) {
   turnsContainer.innerHTML = '';
   legend.innerHTML = '';
-  rawJson.textContent = JSON.stringify(data, null, 2);
+  rawJson.textContent = JSON.stringify(words, null, 2);
 
-  // legend from data.speakers
-  data.speakers.forEach(sp => {
+  const speakers = [...new Set(words.map(w => w.speaker))];
+  speakers.forEach(sp => {
     const c = speakerColor(sp);
     legend.insertAdjacentHTML('beforeend', `
       <div class="legend-item">
@@ -633,22 +715,20 @@ function renderTranscript(data) {
     `);
   });
 
-  // data.text is already "SPEAKER_00 [0.00s]: Hello ...\nSPEAKER_01 [3.20s]: Hi ..."
-  // just parse each line and render
-  data.text.split('\n').forEach(line => {
-    if (!line.trim()) return;
-    // e.g.  SPEAKER_00 [0.00s]: Hello my name is John
-    const match = line.match(/^(\S+)\s+\[([^\]]+)\]:\s*(.*)$/);
-    if (!match) return;
-    const [, speaker, timestamp, text] = match;
-    const c = speakerColor(speaker);
+  turns.forEach(turn => {
+    const c = speakerColor(turn.speaker);
+    const wordSpans = turn.words.map(w => {
+      const title = `${fmtTime(w.start)}–${fmtTime(w.end)}`;
+      return `<span class="word" title="${title}">${wordText(w)}</span>`;
+    }).join(' ');
+
     turnsContainer.insertAdjacentHTML('beforeend', `
       <div class="turn">
         <div class="turn-label">
-          <span class="speaker-tag" style="color:${c.color};background:${c.bg}">${speaker}</span>
-          <div class="turn-time">${timestamp}</div>
+          <span class="speaker-tag" style="color:${c.color};background:${c.bg}">${turn.speaker}</span>
+          <div class="turn-time">${fmtTime(turn.start)} – ${fmtTime(turn.end)}</div>
         </div>
-        <div class="turn-text">${text}</div>
+        <div class="turn-text">${wordSpans}</div>
       </div>
     `);
   });
