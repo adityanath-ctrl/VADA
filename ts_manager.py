@@ -4,7 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import time
-
+from cache.redis import redis
 
 @dataclass
 class TranscriptionJob:
@@ -24,57 +24,20 @@ class DiarizationJob:
     audio_path: str
 
 
-
 class DiarizationManager:
-    def __init__(self,model="nvidia/diar_streaming_sortformer_4spk-v2", num_workers=1, manager:'TranscriptionManager' = None):
-        self.model = ds_pipeline.DiarizationPipeLine(variant=model)
-        self.queue = asyncio.Queue(maxsize=20)
-        self.executor = ThreadPoolExecutor(max_workers=num_workers)
-        self.workers = []
-        self.results = {}
-        self.num_workers = num_workers
-        self.manager = manager
 
-    async def start_workers(self):
-        for i in range(self.num_workers):
-            self.workers.append(
-                asyncio.create_task(self.worker(i))
-            )
+    def __init__(self, redis_client):
+        self.redis = redis_client
 
 
-    async def worker(self, id: int):
-        while True:
-            job = await self.queue.get()
-            loop = asyncio.get_running_loop()
-
-            try:
-                result = await loop.run_in_executor(
-                    self.executor,
-                    self.model.diarize,
-                    job.audio_path
-                )
-                
-                future = self.manager.job_events[job.job_id]["diar"]
-                future.set_result(result)
-            
-            except Exception as e:
-                future = (
-                    self.manager.job_events
-                    .get(job.job_id, {})
-                    .get("diar")
-                )
-                
-                if future and not future.done():
-                    future.set_exception(e)
-
-            finally:
-                self.queue.task_done()
-
-
-    async def submit(self, job: DiarizationJob) -> asyncio.Future:
-        await self.queue.put(job)
-
-
+    async def submit(self, job):
+        await self.redis.rpush(
+            "diarization_jobs",
+            json.dumps({
+                "job_id": job.job_id,
+                "audio_path": job.audio_path
+            })
+        )
 
 
 class TranscriptionManager:
@@ -141,9 +104,10 @@ class TranscriptionManager:
                         job.audio_buffer
                     )
 
-                    future = self.job_events[job.job_id]["asr"]
-                    if future and not future.done():
-                        future.set_result(words  or [])
+                    await self.redis.set(
+                        f"job:{job.job_id}:words",
+                        json.dumps(words)
+                    )
                 
                 else:
                     text = await loop.run_in_executor(

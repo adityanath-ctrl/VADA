@@ -205,86 +205,153 @@ async def shutdown():
 
 
 ##### HTTP endpoint 
-
 @app.post("/transcribe")
 async def upload_audio(request: Request):
     pcm_bytes = await request.body()
 
     if len(pcm_bytes) == 0:
         raise HTTPException(400, "Empty audio body")
+
     if len(pcm_bytes) % 2 != 0:
-        raise HTTPException(400, "Invalid int16 PCM: odd number of bytes")
+        raise HTTPException(
+            400,
+            "Invalid int16 PCM: odd number of bytes"
+        )
 
     job_id = str(uuid.uuid4())
 
-    fd, tmp_path = tempfile.mkstemp(suffix='.wav')
-    os.close(fd)  # close the fd, soundfile will open it itself
-
-    audio_np = np.frombuffer(pcm_bytes, dtype=np.int16)
-    sf.write(tmp_path, audio_np, samplerate=16000, subtype='PCM_16')
-
-    manager.job_events[job_id] = {
-        "asr": asyncio.get_running_loop().create_future(),
-        "diar": asyncio.get_running_loop().create_future()
-    }
-
-    await manager.submit_job(AudioJob(
-        job_id=job_id,
-        audio_buffer=pcm_bytes,
-        audio_path=tmp_path
-    ))
-
-    await dmanager.submit(DiarizationJob(
-        job_id=job_id,
-        audio_path = tmp_path
-    ))
+    fd, tmp_path = tempfile.mkstemp(
+        suffix=".wav"
+    )
+ 
+    os.close(fd)
     
-    print("[INFO]: submitted the both jobs in here")
-    return {"job_id": job_id, "status": "queued"}
+    audio_np = np.frombuffer(
+        pcm_bytes,
+        dtype=np.int16
+    )
 
+    sf.write(
+        tmp_path,
+        audio_np,
+        samplerate=16000,
+        subtype="PCM_16"
+    )
+    
+    # create job state in redis
+    await redis.hset(
+        f"job:{job_id}",
+        mapping={
+            "status": "queued",
+            "asr_status": "queued",
+            "diar_status": "queued"
+        }
+    )
+
+    # submit ASR job
+    await manager.submit_job(
+        AudioJob(
+            job_id=job_id,
+            audio_buffer=pcm_bytes,
+            audio_path=tmp_path
+        )
+    )
+
+    # submit diarization job
+    await dmanager.submit(
+        DiarizationJob(
+            job_id=job_id,
+            audio_path=tmp_path
+        )
+    )
+    print(
+        "[INFO] submitted both jobs",
+        job_id
+    )
+    return {
+        "job_id": job_id,
+        "status": "queued"
+    }
 
 
 @app.get("/transcribe/{job_id}")
 async def get_result(job_id: str):
+    job = await redis.hgetall(
+        f"job:{job_id}"
+    )
 
-    try:
-        events = manager.job_events[job_id]
-        
-        if events is None:
-            raise HTTPException(404, "job not found")
-
-        words, speaker_turns = await asyncio.gather(
-            events["asr"],
-            events["diar"]
+    if not job:
+        raise HTTPException(
+            404,
+            "job not found"
         )
 
 
-        merged = merge_words_with_speakers(words, speaker_turns)
+    asr_status = job.get(
+        "asr_status"
+    )
 
+    diar_status = job.get(
+        "diar_status"
+    )
+
+
+    if (
+        asr_status != "done"
+        or diar_status != "done"
+    ):
         return {
             "job_id": job_id,
-            "words": merged,
-            "text": build_text_with_speakers(merged),
-            "speakers": list({w["speaker"] for w in merged})
+            "status": "processing",
+            "asr_status": asr_status,
+            "diar_status": diar_status
         }
 
-    except Exception as e:
-        raise HTTPException(500, str(e))
 
-    finally:
-        events = manager.job_events.pop(job_id)
-        if events:
-            asr_done = events["asr"].done()
-            diar_done = events["diar"].done()
+    words_json = await redis.get(
+        f"job:{job_id}:words"
+    )
 
-            if asr_done and diar_done:
-                manager.job_events.pop(
-                    job_id, 
-                    None
-                )
+    speakers_json = await redis.get(
+        f"job:{job_id}:speakers"
+    )
 
-        print("[INFO] manager is shutting down", manager.job_events)
 
+    if not words_json or not speakers_json:
+        raise HTTPException(
+            500,
+            "job completed but result missing"
+        )
+
+
+    words = json.loads(
+        words_json
+    )
+
+    speaker_turns = json.loads(
+        speakers_json
+    )
+
+
+    merged = merge_words_with_speakers(
+        words,
+        speaker_turns
+    )
+
+
+    return {
+        "job_id": job_id,
+        "words": merged,
+        "text": build_text_with_speakers(
+            merged
+        ),
+        "speakers": list(
+            {
+                w["speaker"]
+                for w in merged
+            }
+        )
+    }
 
 ##### HTTP endpoint
 
