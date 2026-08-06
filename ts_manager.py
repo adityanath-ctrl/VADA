@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 import time
 from cache.redis import redis
+import json
 
 @dataclass
 class TranscriptionJob:
@@ -26,8 +27,8 @@ class DiarizationJob:
 
 class DiarizationManager:
 
-    def __init__(self, redis_client):
-        self.redis = redis_client
+    def __init__(self):
+        self.redis = redis
 
 
     async def submit(self, job):
@@ -103,12 +104,19 @@ class TranscriptionManager:
                         self.pipeline.transcribe_session,
                         job.audio_buffer
                     )
-
-                    await self.redis.set(
+                    
+                    print("[Words]",words)
+                    await redis.set(
                         f"job:{job.job_id}:words",
                         json.dumps(words)
                     )
-                
+
+                    await redis.hset(
+                            f"job:{job.job_id}",
+                            "asr_status",
+                            "done"
+                    )                
+                    
                 else:
                     text = await loop.run_in_executor(
                         self.executor,

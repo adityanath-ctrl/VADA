@@ -13,8 +13,32 @@ from metrics.system import CPU, GPU
 import soundfile as sf
 import tempfile
 import os 
+from contextlib import asynccontextmanager
+from cache.redis import redis
 
-app = FastAPI()
+
+manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
+dmanager = DiarizationManager()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    await manager.start_workers()
+
+    try:
+        yield
+    finally:
+        # Shutdown
+        for w in  manager.workers:
+            w.cancel()
+
+        manager.executor.shutdown(
+            wait=True,
+            cancel_futures=True,
+        )
+
+
+app = FastAPI(lifespan=lifespan)
 
 #app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -120,10 +144,6 @@ FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 """ 
     global manager for managing jobs right now everything is defaulting to default value  
 """
-manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
-dmanager = DiarizationManager(num_workers=1, manager=manager)
-
-
 @app.get("/health/live")
 def liveness():
     return {"status": "live"}
@@ -182,11 +202,6 @@ def metrics():
         "gpu_mem_used": GPU.get_memory_used_mb()   
     }
 
-
-@app.on_event("startup")
-async def startup():
-    await manager.start_workers()
-    await dmanager.start_workers()
 
 
 @app.on_event("shutdown")
@@ -279,7 +294,9 @@ async def get_result(job_id: str):
     job = await redis.hgetall(
         f"job:{job_id}"
     )
-
+    
+    print("TRANSCRIBE REQUEST RECEIVED", job_id, flush=True)
+    
     if not job:
         raise HTTPException(
             404,
@@ -294,8 +311,7 @@ async def get_result(job_id: str):
     diar_status = job.get(
         "diar_status"
     )
-
-
+    
     if (
         asr_status != "done"
         or diar_status != "done"
@@ -311,9 +327,9 @@ async def get_result(job_id: str):
     words_json = await redis.get(
         f"job:{job_id}:words"
     )
-
+        
     speakers_json = await redis.get(
-        f"job:{job_id}:speakers"
+        f"job:{job_id}:diar"
     )
 
 
@@ -332,12 +348,13 @@ async def get_result(job_id: str):
         speakers_json
     )
 
-
+    print("NORMAL PRINTINF IN HERE")
     merged = merge_words_with_speakers(
         words,
         speaker_turns
     )
-
+    
+    print("[INFO] this is the merged in here", merged)
 
     return {
         "job_id": job_id,
