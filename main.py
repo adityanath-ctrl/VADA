@@ -24,13 +24,39 @@ from nemo.collections.asr.models import ASRModel
 class AAudioJob:
     audio: np.ndarray
     ws: WebSocket
+    chunk_start_time: float
+    is_close: bool = False
 
 
+# important constants begin
 SAMPLE_RATE = 16000
 CHANNELS = 1
-SAMPLE_WIDTH = 2
+SAMPLE_WIDTH = 2  # int16 = 2 bytes
+
 CHUNK_DURATION = 5
-TRANSCRIBE_BYTES = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH * CHUNK_DURATION
+OVERLAP_DURATION = 2
+STEP_DURATION = CHUNK_DURATION - OVERLAP_DURATION  
+
+CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_DURATION       
+OVERLAP_SAMPLES = SAMPLE_RATE * OVERLAP_DURATION   
+STEP_SAMPLES = SAMPLE_RATE * STEP_DURATION         
+
+TRANSCRIBE_BYTES = (
+    SAMPLE_RATE
+    * CHANNELS
+    * SAMPLE_WIDTH
+    * CHUNK_DURATION
+)
+
+STEP_BYTES = (
+    SAMPLE_RATE
+    * CHANNELS
+    * SAMPLE_WIDTH
+    * STEP_DURATION
+)
+# important constants end
+
+
 
 manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
 dmanager = DiarizationManager()
@@ -45,10 +71,12 @@ from fastapi import FastAPI
 
 def run_transcribe(model, audios,batch_size):
 	with torch.inference_mode(), torch.autocast(device_type='cuda',dtype=torch.bfloat16):
-		return model.transcribe(audio=audios,batch_size=batch_size)
+		return model.transcribe(audio=audios,batch_size=batch_size, timestamps=True)
 
 
 async def transcription_worker(model):
+    committed_state = {}
+
     while True:
         batch: list[AAudioJob] = []
 
@@ -72,28 +100,52 @@ async def transcription_worker(model):
         except asyncio.TimeoutError:
             pass
 
-        audios = [j.audio for j in batch]
-        print(f"[Worker] Batch size: {len(batch)} | Queue left: {audio_queue.qsize()}")
+        real_jobs = []
+        for j in batch:
+            if j.is_close:
+                committed_state.pop(j.ws, None)
+                print(f"[Worker] Cleaned up committed_state for closed ws")
+            else:
+                real_jobs.append(j)
+
+        if not real_jobs:
+            for _ in batch:
+                audio_queue.task_done()
+            continue
+
+        audios = [j.audio for j in real_jobs]
+        print(f"[Worker] Batch size: {len(real_jobs)} | Queue left: {audio_queue.qsize()}")
 
         try:
             async with model_lock:
-            	results = await asyncio.to_thread(
-            		run_transcribe,
-            		model,
-            		audios,
-            		len(audios)
-            	)
+                results = await asyncio.to_thread(
+                    run_transcribe,
+                    model,
+                    audios,
+                    len(audios)
+                )
 
-            
-            for job, hyp in zip(batch, results):
-
+            for job, hyp in zip(real_jobs, results):
                 try:
-                    text = hyp.text if hyp.text is not None else ""
-                    
-                    await job.ws.send_json({
-                        "type": "transcript",
-                        "text": text
-                    })
+                    words = hyp.timestamp.get('word', []) if hyp.timestamp else []
+                    committed_until = committed_state.get(job.ws, 0.0)
+                    safe_boundary = job.chunk_start_time + STEP_DURATION
+
+                    new_words = []
+                    for w in words:
+                        g_start = job.chunk_start_time + w["start"]
+                        g_end = job.chunk_start_time + w["end"]
+                        if g_start >= committed_until and g_start < safe_boundary:
+                            new_words.append(w["word"])
+                            committed_until = g_end
+
+                    committed_state[job.ws] = max(committed_state.get(job.ws, 0.0), committed_until)
+
+                    if new_words:
+                        await job.ws.send_json({
+                            "type": "transcript",
+                            "text": " ".join(new_words)
+                        })
 
                 except Exception:
                     pass
@@ -144,12 +196,6 @@ async def lifespan(app: FastAPI):
         for w in manager.workers:
             w.cancel()
 
-#        manager.executor.shutdown(
-#            wait=True,
-#            cancel_futures=True,
-#        )
-#
-
         del app.state.model
         del app.state.worker_task
 
@@ -187,15 +233,29 @@ def build_text_with_speakers(words: list) -> str:
 
 
 def merge_words_with_speakers(words: list, speaker_turns: list) -> list:
+    turns = sorted(speaker_turns, key=lambda t: t["start"])
     result = []
+
     for word in words:
-        word_mid = (word["start"] + word["end"]) / 2
-        speaker = "UNKNOWN"
-        for turn in speaker_turns:
-            if turn["start"] <= word_mid <= turn["end"]:
-                speaker = turn["speaker"]
-                break
+        w_start, w_end = word["start"], word["end"]
+
+        best_turn = None
+        best_overlap = 0.0
+        for turn in turns:
+            overlap = min(w_end, turn["end"]) - max(w_start, turn["start"])
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_turn = turn
+
+        if best_turn is None:
+            best_turn = min(
+                turns,
+                key=lambda t: min(abs(t["start"] - w_end), abs(w_start - t["end"])),
+            )
+
+        speaker = best_turn["speaker"] if best_turn else "UNKNOWN"
         result.append({**word, "speaker": speaker})
+
     return result
 
 
@@ -413,7 +473,7 @@ async def get_result(job_id: str, timeout: float = 120.0, poll_interval: float =
         diar_status = job.get("diar_status")
 
         if asr_status == "done" and diar_status == "done":
-            break  # fall through to build + return result
+            break 
 
         if asr_status == "failed" or diar_status == "failed":
             raise HTTPException(500, "job failed during processing")
@@ -446,14 +506,17 @@ async def web(ws: WebSocket):
     await ws.accept()
 
     buffer = bytearray()
+    bytes_consumed = 0
+    committed_until = 0.0
 
     try:
         while True:
-
-            start = time.perf_counter()
             chunk = await ws.receive_bytes()
-            end = time.perf_counter()
-            print(f"[receive time] {end - start}")
+            chunk_audio = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+
+            if chunk_audio.std() < 0.005:
+                continue
+ 
             buffer.extend(chunk)
 
             if len(buffer) % 2 != 0:
@@ -461,20 +524,23 @@ async def web(ws: WebSocket):
 
             while len(buffer) >= TRANSCRIBE_BYTES:
                 pcm = bytes(buffer[:TRANSCRIBE_BYTES])
-                del buffer[:TRANSCRIBE_BYTES]
+                chunk_start_time = bytes_consumed / (SAMPLE_RATE * SAMPLE_WIDTH)
+                del buffer[:STEP_BYTES]
+                
+                bytes_consumed += STEP_BYTES
 
                 audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
-
-                if audio.std() < 0.005:
-                    print("skipping silent chunks")
-                    continue
 
                 await audio_queue.put(
                     AAudioJob(
                         audio=audio,
                         ws=ws,
+                        chunk_start_time=chunk_start_time
                     )
                 )
 
     except WebSocketDisconnect:
         pass
+
+    finally:
+        await audio_queue.put(AAudioJob(audio=None, ws=ws, chunk_start_time=0.0, is_close=True))
