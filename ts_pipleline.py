@@ -2,7 +2,7 @@ from faster_whisper import WhisperModel
 import numpy as np
 import time
 
-MAX_CUDA_WORKERS=4
+MAX_CUDA_WORKERS=2
 
 def format_timestamp(seconds):
     h = int(seconds // 3600)
@@ -13,7 +13,7 @@ def format_timestamp(seconds):
 
 
 class TranscriptionPipeline:
-    def __init__(self,model="medium", device="cuda", compute_type="float16", beam_size = 1, 
+    def __init__(self,model="tiny", device="cuda", compute_type="float16", beam_size = 1, 
                        no_speech_threshold=0.5, avg_logprob_threshold=-1.0, 
                        condition_on_previous_text=False):
                        

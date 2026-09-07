@@ -14,13 +14,8 @@ class DiarizationWorker:
         )
         print("Sortformer loaded")
 
-
     def process(self, audio_path):
-        return self.model.diarize(
-            audio_path
-        )
-
-
+        return self.model.diarize(audio_path)
 
 
 def create_redis():
@@ -30,52 +25,58 @@ def create_redis():
         ssl=True,
         decode_responses=True,
         health_check_interval=30,
+        socket_keepalive=True,
+        socket_timeout=35,
+        socket_connect_timeout=10,
+        retry_on_timeout=True,
     )
 
+
+worker = DiarizationWorker()
+
+# hash-tagged so both keys always land on the same cluster slot
+QUEUE_KEY = "{diarization_jobs}:main"
+PROCESSING_LIST = "{diarization_jobs}:processing"
 
 
 async def main():
     redis_client = create_redis()
 
-    worker = DiarizationWorker()
     while True:
         try:
-            item = await redis_client.blpop(
-                "diarization_jobs",
+            payload = await redis_client.brpoplpush(
+                QUEUE_KEY,
+                PROCESSING_LIST,
                 timeout=30,
             )
-            
-            print("[INFO] Here comes the data in here")
-            if item is None:
+
+            if payload is None:
                 continue
-    
-            _, payload = item
-    
+
+            print("this is the item in here", payload)
             job = json.loads(payload)
-            
             job_id = job["job_id"]
             audio_path = job["audio_path"]
+
             result = worker.process(audio_path)
-            
             print("[INFO]", result)
-            await redis_client.set(
-                f"job:{job_id}:diar",
-                json.dumps(result)
-            )
 
-            await redis_client.hset(
-                f"job:{job_id}",
-                "diar_status",
-                "done"
-            )
+            await redis_client.set(f"job:{job_id}:diar", json.dumps(result))
+            await redis_client.hset(f"job:{job_id}", "diar_status", "done")
 
-        except (TimeoutError, ConnectionError):
-            print("Redis disconnected. Reconnecting...")
-    
-            await redis_client.aclose()
+            await redis_client.lrem(PROCESSING_LIST, 1, payload)
+
+        except (TimeoutError, ConnectionError) as e:
+            print(f"Redis disconnected ({e}). Reconnecting...")
+            try:
+                await redis_client.aclose()
+            except Exception:
+                pass
             await asyncio.sleep(5)
-    
-            redis_client = await create_redis()
+            redis_client = create_redis()
+
+        except Exception as e:
+            print(f"[ERROR] job failed: {e}")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ class DiarizationJob:
     job_id: str
     audio_path: str
 
-
+QUEUE_KEY = "{diarization_jobs}:main"
 class DiarizationManager:
 
     def __init__(self):
@@ -32,17 +32,27 @@ class DiarizationManager:
 
 
     async def submit(self, job):
-        await self.redis.rpush(
-            "diarization_jobs",
+        length = await self.redis.rpush(
+            QUEUE_KEY,
             json.dumps({
                 "job_id": job.job_id,
                 "audio_path": job.audio_path
             })
         )
+        print("[DIAR PUSH]", job.job_id, flush=True)
+
+
+        print(
+            "[DIAR QUEUE LENGTH AFTER PUSH]",
+            length,
+            flush=True
+        )
+
+
 
 
 class TranscriptionManager:
-    def __init__(self,model_name="medium",num_workers = 4,
+    def __init__(self,model_name="tiny",num_workers = 2,
                       device="cuda", compute_type='float16',
                       queue_size=50,condition_on_previous_text=False
         ):

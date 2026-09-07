@@ -597,17 +597,13 @@ btnSend.addEventListener('click', async () => {
   }
 });
 
-async function poll(job_id, interval = 1500, maxAttempts = 200) {
-  for (let i = 0; i < maxAttempts; i++) {
-    await new Promise(r => setTimeout(r, interval));
-    const res = await fetch(`${API_BASE}/transcribe/${job_id}`);
-    if (res.status === 200) return res.json();
-    if (res.status !== 202 && res.status !== 404) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || `Server error ${res.status}`);
-    }
+async function poll(job_id, timeoutSeconds = 120) {
+  const res = await fetch(`${API_BASE}/transcribe/${job_id}?timeout=${timeoutSeconds}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Server error ${res.status}`);
   }
-  throw new Error('Timed out waiting for result');
+  return res.json();
 }
 
 // --- render ---

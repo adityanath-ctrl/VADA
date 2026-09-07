@@ -15,32 +15,154 @@ import tempfile
 import os 
 from contextlib import asynccontextmanager
 from cache.redis import redis
+import time
+from dataclasses import dataclass
 
+
+from nemo.collections.asr.models import ASRModel
+@dataclass
+class AAudioJob:
+    audio: np.ndarray
+    ws: WebSocket
+
+
+SAMPLE_RATE = 16000
+CHANNELS = 1
+SAMPLE_WIDTH = 2
+CHUNK_DURATION = 5
+TRANSCRIBE_BYTES = SAMPLE_RATE * CHANNELS * SAMPLE_WIDTH * CHUNK_DURATION
 
 manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
 dmanager = DiarizationManager()
+audio_queue = asyncio.Queue()
+model_lock = asyncio.Lock()
+
+from contextlib import asynccontextmanager
+import asyncio
+import torch
+from fastapi import FastAPI
+
+
+def run_transcribe(model, audios,batch_size):
+	with torch.inference_mode(), torch.autocast(device_type='cuda',dtype=torch.bfloat16):
+		return model.transcribe(audio=audios,batch_size=batch_size)
+
+
+async def transcription_worker(model):
+    while True:
+        batch: list[AAudioJob] = []
+
+        job = await audio_queue.get()
+        batch.append(job)
+
+        queue_size = audio_queue.qsize()
+        if queue_size == 0:
+            max_batch = 1
+        elif queue_size < 5:
+            max_batch = 3
+        elif queue_size < 15:
+            max_batch = 6
+        else:
+            max_batch = 10
+
+        try:
+            while len(batch) < max_batch:
+                job = await asyncio.wait_for(audio_queue.get(), timeout=0.15)
+                batch.append(job)
+        except asyncio.TimeoutError:
+            pass
+
+        audios = [j.audio for j in batch]
+        print(f"[Worker] Batch size: {len(batch)} | Queue left: {audio_queue.qsize()}")
+
+        try:
+            async with model_lock:
+            	results = await asyncio.to_thread(
+            		run_transcribe,
+            		model,
+            		audios,
+            		len(audios)
+            	)
+
+            
+            for job, hyp in zip(batch, results):
+
+                try:
+                    text = hyp.text if hyp.text is not None else ""
+                    
+                    await job.ws.send_json({
+                        "type": "transcript",
+                        "text": text
+                    })
+
+                except Exception:
+                    pass
+
+        except Exception as e:
+            print(f"[Worker] Transcription error: {e}")
+
+        for _ in batch:
+            audio_queue.task_done()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    print("Loading parakeet ....", flush=True)
+    model = ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
+    
+    if torch.cuda.is_available():
+        model = model.to(device="cuda")
+        print(f"Allocated : {torch.cuda.memory_allocated()/1024**3:.2f} GB")
+        print(f"Reserved  : {torch.cuda.memory_reserved()/1024**3:.2f} GB")
+    
+    model.eval()
+
+    
+    worker_task = asyncio.create_task(transcription_worker(model))
+    app.state.model = model
+    app.state.worker_task = worker_task
+
     await manager.start_workers()
+
+    print("All workers started....", flush=True)
+
 
     try:
         yield
+
     finally:
-        # Shutdown
-        for w in  manager.workers:
+        print("Shutting down....", flush=True)
+
+        worker_task.cancel()
+
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
+
+
+        for w in manager.workers:
             w.cancel()
 
-        manager.executor.shutdown(
-            wait=True,
-            cancel_futures=True,
-        )
+#        manager.executor.shutdown(
+#            wait=True,
+#            cancel_futures=True,
+#        )
+#
+
+        del app.state.model
+        del app.state.worker_task
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print("Shutdown complete", flush=True)
+
 
 
 app = FastAPI(lifespan=lifespan)
 
-#app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 def build_text_with_speakers(words: list) -> str:
     if not words:
@@ -119,9 +241,9 @@ def build_text_with_speakers(words: list) -> str:
     @deprecated will be removing this as soon as possible 
 """
 
-#@app.get("/")
-#def home():
-#   return FileResponse("static/index.html")
+@app.get("/")
+def home():
+   return FileResponse("static/index.html")
 
 
 @app.get("/dashboard")
@@ -132,22 +254,10 @@ async def dashboard():
 async def show_recorder():
     return FileResponse("static/transcribe_upload.html")
 
-"""
-    constants
-"""
-CHUNK_DURATION_S=5
-SAMPLE_RATE=16000
-BYTES_PER_SAMPLE=2
-FLUSH_SIZE=SAMPLE_RATE*BYTES_PER_SAMPLE*CHUNK_DURATION_S
 
-
-""" 
-    global manager for managing jobs right now everything is defaulting to default value  
-"""
 @app.get("/health/live")
 def liveness():
     return {"status": "live"}
-
 
 
 async def monitor():
@@ -289,121 +399,82 @@ async def upload_audio(request: Request):
     }
 
 
+
 @app.get("/transcribe/{job_id}")
-async def get_result(job_id: str):
-    job = await redis.hgetall(
-        f"job:{job_id}"
-    )
-    
-    print("TRANSCRIBE REQUEST RECEIVED", job_id, flush=True)
-    
-    if not job:
-        raise HTTPException(
-            404,
-            "job not found"
-        )
+async def get_result(job_id: str, timeout: float = 120.0, poll_interval: float = 1.0):
+    start = asyncio.get_event_loop().time()
 
+    while True:
+        job = await redis.hgetall(f"job:{job_id}")
+        if not job:
+            raise HTTPException(404, "job not found")
 
-    asr_status = job.get(
-        "asr_status"
-    )
+        asr_status = job.get("asr_status")
+        diar_status = job.get("diar_status")
 
-    diar_status = job.get(
-        "diar_status"
-    )
-    
-    if (
-        asr_status != "done"
-        or diar_status != "done"
-    ):
-        return {
-            "job_id": job_id,
-            "status": "processing",
-            "asr_status": asr_status,
-            "diar_status": diar_status
-        }
+        if asr_status == "done" and diar_status == "done":
+            break  # fall through to build + return result
 
+        if asr_status == "failed" or diar_status == "failed":
+            raise HTTPException(500, "job failed during processing")
 
-    words_json = await redis.get(
-        f"job:{job_id}:words"
-    )
-        
-    speakers_json = await redis.get(
-        f"job:{job_id}:diar"
-    )
+        if asyncio.get_event_loop().time() - start > timeout:
+            raise HTTPException(504, "job did not complete in time")
 
+        await asyncio.sleep(poll_interval)
 
+    words_json = await redis.get(f"job:{job_id}:words")
+    speakers_json = await redis.get(f"job:{job_id}:diar")
     if not words_json or not speakers_json:
-        raise HTTPException(
-            500,
-            "job completed but result missing"
-        )
+        raise HTTPException(500, "job completed but result missing")
 
-
-    words = json.loads(
-        words_json
-    )
-
-    speaker_turns = json.loads(
-        speakers_json
-    )
-
-    print("NORMAL PRINTINF IN HERE")
-    merged = merge_words_with_speakers(
-        words,
-        speaker_turns
-    )
-    
-    print("[INFO] this is the merged in here", merged)
+    words = json.loads(words_json)
+    speaker_turns = json.loads(speakers_json)
+    merged = merge_words_with_speakers(words, speaker_turns)
 
     return {
         "job_id": job_id,
         "words": merged,
-        "text": build_text_with_speakers(
-            merged
-        ),
-        "speakers": list(
-            {
-                w["speaker"]
-                for w in merged
-            }
-        )
+        "text": build_text_with_speakers(merged),
+        "speakers": list({w["speaker"] for w in merged})
     }
 
+
 ##### HTTP endpoint
-
-
-
-
 @app.websocket("/ws")
-async def audio_ws(websocket:WebSocket):
-    await websocket.accept()
-    manager.active_i()
+async def web(ws: WebSocket):
+    await ws.accept()
 
-    """will soon be deprecated and we will use the hypothesis buffer"""
-    clientbuffer = bytearray()
-    ws_lock = asyncio.Lock()
+    buffer = bytearray()
 
     try:
         while True:
-            chunk = await websocket.receive_bytes()
-            clientbuffer.extend(chunk)
-            
-            if len(clientbuffer) >= FLUSH_SIZE:
-                audio_bytes = bytes(clientbuffer)
-                clientbuffer.clear()
-                
-                job = TranscriptionJob(
-                        audio_buffer=audio_bytes,
-                        websocket=websocket,
-                        ws_lock = ws_lock
+
+            start = time.perf_counter()
+            chunk = await ws.receive_bytes()
+            end = time.perf_counter()
+            print(f"[receive time] {end - start}")
+            buffer.extend(chunk)
+
+            if len(buffer) % 2 != 0:
+                buffer = buffer[:-1]
+
+            while len(buffer) >= TRANSCRIBE_BYTES:
+                pcm = bytes(buffer[:TRANSCRIBE_BYTES])
+                del buffer[:TRANSCRIBE_BYTES]
+
+                audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+
+                if audio.std() < 0.005:
+                    print("skipping silent chunks")
+                    continue
+
+                await audio_queue.put(
+                    AAudioJob(
+                        audio=audio,
+                        ws=ws,
+                    )
                 )
-                await manager.submit_job(job)
 
-    except WebSocketDisconnect as e:
-        print("Client disconnected")
-
-    finally:
-        manager.active_d()
-
-
+    except WebSocketDisconnect:
+        pass
