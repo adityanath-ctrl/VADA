@@ -37,6 +37,7 @@ worker = DiarizationWorker()
 # hash-tagged so both keys always land on the same cluster slot
 QUEUE_KEY = "{diarization_jobs}:main"
 PROCESSING_LIST = "{diarization_jobs}:processing"
+COMPLETION_QUEUE = "transcription:completion"
 
 
 async def main():
@@ -63,6 +64,7 @@ async def main():
 
             await redis_client.set(f"job:{job_id}:diar", json.dumps(result))
             await redis_client.hset(f"job:{job_id}", "diar_status", "done")
+            await redis_client.rpush(COMPLETION_QUEUE,job_id)
 
             await redis_client.lrem(PROCESSING_LIST, 1, payload)
 

@@ -17,9 +17,12 @@ from contextlib import asynccontextmanager
 from cache.redis import redis
 import time
 from dataclasses import dataclass
-
-
+import httpx
+from pydantic import BaseModel, HttpUrl
 from nemo.collections.asr.models import ASRModel
+import wave
+
+
 @dataclass
 class AAudioJob:
     audio: np.ndarray
@@ -33,8 +36,8 @@ SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # int16 = 2 bytes
 
-CHUNK_DURATION = 5
-OVERLAP_DURATION = 2
+CHUNK_DURATION = 8
+OVERLAP_DURATION = 4
 STEP_DURATION = CHUNK_DURATION - OVERLAP_DURATION  
 
 CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_DURATION       
@@ -54,6 +57,7 @@ STEP_BYTES = (
     * SAMPLE_WIDTH
     * STEP_DURATION
 )
+COMPLETION_QUEUE = "transcription:completion"
 # important constants end
 
 
@@ -72,6 +76,152 @@ from fastapi import FastAPI
 def run_transcribe(model, audios,batch_size):
 	with torch.inference_mode(), torch.autocast(device_type='cuda',dtype=torch.bfloat16):
 		return model.transcribe(audio=audios,batch_size=batch_size, timestamps=True)
+
+import json
+import os
+import httpx
+
+
+async def complete_transcription(job_id: str, job: dict):
+    try:
+        # Get ASR result
+        words_json = await redis.get(
+            f"job:{job_id}:words"
+        )
+
+        # Get diarization result
+        speakers_json = await redis.get(
+            f"job:{job_id}:diar"
+        )
+
+        if not words_json:
+            raise RuntimeError(
+                f"ASR result missing for job {job_id}"
+            )
+
+        if not speakers_json:
+            raise RuntimeError(
+                f"Diarization result missing for job {job_id}"
+            )
+
+        words = json.loads(words_json)
+        speaker_turns = json.loads(speakers_json)
+
+        # Merge ASR words with speaker turns
+        merged = merge_words_with_speakers(
+            words,
+            speaker_turns
+        )
+
+        # Build final transcript
+        transcript = build_text_with_speakers(
+            merged
+        )
+
+        speakers = list({
+            word["speaker"]
+            for word in merged
+            if word.get("speaker") is not None
+        })
+
+        callback_url = job.get("callback_url")
+
+        if not callback_url:
+            raise RuntimeError(
+                f"Callback URL missing for job {job_id}"
+            )
+
+        payload = {
+            "job_id": job_id,
+            "status": "completed",
+            "transcript": transcript,
+            "words": merged,
+            "speakers": speakers
+        }
+
+        print(
+            "[INFO] Sending transcription callback:",
+            job_id
+        )
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                callback_url,
+                json=payload
+            )
+
+            response.raise_for_status()
+
+        print(
+            "[INFO] Transcription callback completed:",
+            job_id
+        )
+
+        await redis.hset(
+            f"job:{job_id}",
+            "status",
+            "completed"
+        )
+
+        audio_path = job.get("audio_path")
+
+        if audio_path and os.path.exists(audio_path):
+            os.remove(audio_path)
+
+        await redis.delete(
+            f"job:{job_id}:words",
+            f"job:{job_id}:diar"
+        )
+
+    except Exception as e:
+        print(
+            f"[ERROR] Failed to complete transcription "
+            f"{job_id}: {e}"
+        )
+
+        await redis.hset(
+            f"job:{job_id}",
+            mapping={
+                "status": "failed",
+                "error": str(e)
+            }
+        )
+
+
+async def completion_worker():
+    while True:
+        try:
+            job_id = await redis.lpop(COMPLETION_QUEUE)
+
+            if job_id is None:
+                await asyncio.sleep(0.5)
+                continue
+
+            print("[COMPLETION WORKER] popped:", job_id)
+
+            job = await redis.hgetall(f"job:{job_id}")
+
+            if not job:
+                continue
+
+            asr_done = job.get("asr_status") == "done"
+            diar_done = job.get("diar_status") == "done"
+
+            if not (asr_done and diar_done):
+                continue
+
+            print(
+                "[INFO] ASR + diarization completed:",
+                job_id
+            )
+
+            await complete_transcription(job_id, job)
+
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(1)
+
 
 
 async def transcription_worker(model):
@@ -161,7 +311,7 @@ async def transcription_worker(model):
 async def lifespan(app: FastAPI):
     print("Loading parakeet ....", flush=True)
     model = ASRModel.from_pretrained("nvidia/parakeet-tdt-0.6b-v3")
-    
+
     if torch.cuda.is_available():
         model = model.to(device="cuda")
         print(f"Allocated : {torch.cuda.memory_allocated()/1024**3:.2f} GB")
@@ -173,6 +323,10 @@ async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(transcription_worker(model))
     app.state.model = model
     app.state.worker_task = worker_task
+    completion_task = asyncio.create_task(
+        completion_worker()
+    )
+
 
     await manager.start_workers()
 
@@ -186,9 +340,11 @@ async def lifespan(app: FastAPI):
         print("Shutting down....", flush=True)
 
         worker_task.cancel()
+        completion_task.cancel()
 
         try:
             await worker_task
+            await completion_task
         except asyncio.CancelledError:
             pass
 
@@ -437,7 +593,6 @@ async def upload_audio(request: Request):
     await manager.submit_job(
         AudioJob(
             job_id=job_id,
-            audio_buffer=pcm_bytes,
             audio_path=tmp_path
         )
     )
@@ -500,6 +655,103 @@ async def get_result(job_id: str, timeout: float = 120.0, poll_interval: float =
     }
 
 
+
+class TranscriptionPayload(BaseModel):
+    job_id: str
+    file_url: str
+    callback_url: str
+
+
+###### new job and callback based endpoint 
+@app.post("/transcriptions")
+async def start_transcription(payload: TranscriptionPayload):
+    job_id = payload.job_id
+    fd, wav_path = tempfile.mkstemp(
+        suffix=".wav"
+    )
+    os.close(fd)
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=None
+        ) as client:
+
+            async with client.stream(
+                "GET",
+                payload.file_url
+            ) as response:
+
+                response.raise_for_status()
+
+                with wave.open(wav_path, "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(16000)
+
+                    async for chunk in response.aiter_bytes(
+                        chunk_size=1024 * 1024
+                    ):
+                        if chunk:
+                            wav.writeframes(chunk)
+
+        file_size = os.path.getsize(wav_path)
+
+        if file_size <= 44:
+            raise HTTPException(
+                400,
+                "Empty audio file"
+            )
+
+        await redis.hset(
+            f"job:{job_id}",
+            mapping={
+                "status": "queued",
+                "asr_status": "queued",
+                "diar_status": "queued",
+                "callback_url": payload.callback_url,
+                "audio_path": wav_path,
+                "callback_status": "pending"
+            }
+        )
+
+        # ASR
+        await manager.submit_job(
+            AudioJob(
+                job_id=job_id,
+                audio_path=wav_path
+            )
+        )
+
+        # Sortformer diarization
+        await dmanager.submit(
+            DiarizationJob(
+                job_id=job_id,
+                audio_path=wav_path
+            )
+        )
+
+        print(
+            "[INFO] submitted ASR + Sortformer",
+            job_id,
+            wav_path
+        )
+
+        return {
+            "job_id": job_id,
+            "status": "queued"
+        }
+
+    except Exception:
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
+
+        raise
+
+##### new job and callback based endpoint ends
+
+
+
+
 ##### HTTP endpoint
 @app.websocket("/ws")
 async def web(ws: WebSocket):
@@ -513,10 +765,35 @@ async def web(ws: WebSocket):
         while True:
             chunk = await ws.receive_bytes()
             chunk_audio = np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+            
+#            if chunk_audio.std() < 0.005:
+#                if len(buffer) > 0:
+#                    pcm = bytes(buffer)
+#            
+#                    if len(pcm) % 2 != 0:
+#                        pcm = pcm[:-1]
+#            
+#                    if len(pcm) > 0:
+#                        audio = (
+#                            np.frombuffer(pcm, dtype=np.int16)
+#                            .astype(np.float32)
+#                            / 32768.0
+#                        )
+#            
+#                        chunk_start_time = bytes_consumed / (SAMPLE_RATE * SAMPLE_WIDTH)
+#            
+#                        await audio_queue.put(
+#                            AAudioJob(
+#                                audio=audio,
+#                                ws=ws,
+#                                chunk_start_time=chunk_start_time,
+#                            )
+#                        )
+#            
+#                        bytes_consumed += len(pcm)
+#                    buffer.clear()
+#                continue       
 
-            if chunk_audio.std() < 0.005:
-                continue
- 
             buffer.extend(chunk)
 
             if len(buffer) % 2 != 0:

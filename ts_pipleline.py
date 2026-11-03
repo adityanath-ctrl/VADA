@@ -1,6 +1,7 @@
 from faster_whisper import WhisperModel, BatchedInferencePipeline
 import numpy as np
 
+MAX_CUDA_WORKERS=2
 
 class TranscriptionPipeline:
     def __init__(self, model="tiny", device="cuda", compute_type="float16", beam_size=1,
@@ -42,10 +43,9 @@ class TranscriptionPipeline:
                 texts.append(text)
         return " ".join(texts) if texts else ""
 
-    def transcribe_session(self, audio_bytes: bytes):
-        audio = np.frombuffer(audio_bytes, np.int16).astype(np.float32) / 32768.0
+    def transcribe_session(self, wav_path: str):
         segments, info = self.model.transcribe(
-            audio,
+            wav_path,
             batch_size=self.batch_size,
             beam_size=self.beam_size,
             temperature=0.0,
@@ -61,12 +61,13 @@ class TranscriptionPipeline:
         words = []
 
         for segment in segments:
-            for word in segment.words:
-                words.append({
-                    "start": word.start,
-                    "end": word.end,
-                    "word": word.word.strip()
-                })
+            if segment.words:
+                for word in segment.words:
+                    words.append({
+                        "start": word.start,
+                        "end": word.end,
+                        "word": word.word.strip()
+                    })
 
         return words
 

@@ -7,6 +7,10 @@ import time
 from cache.redis import redis
 import json
 
+COMPLETION_QUEUE = "transcription:completion"
+
+
+
 @dataclass
 class TranscriptionJob:
     audio_buffer: bytes
@@ -15,7 +19,6 @@ class TranscriptionJob:
 
 @dataclass
 class AudioJob:
-    audio_buffer: bytes
     job_id: str
     audio_path: str
 
@@ -52,7 +55,7 @@ class DiarizationManager:
 
 
 class TranscriptionManager:
-    def __init__(self,model_name="tiny",num_workers = 2,
+    def __init__(self,model_name="base",num_workers = 2,
                       device="cuda", compute_type='float16',
                       queue_size=50,condition_on_previous_text=False
         ):
@@ -112,7 +115,7 @@ class TranscriptionManager:
                     words = await loop.run_in_executor(
                         self.executor,
                         self.pipeline.transcribe_session,
-                        job.audio_buffer
+                        job.audio_path
                     )
                     
                     print("[Words]",words)
@@ -125,8 +128,13 @@ class TranscriptionManager:
                             f"job:{job.job_id}",
                             "asr_status",
                             "done"
-                    )                
-                    
+                    )              
+
+                    await redis.rpush(
+                        COMPLETION_QUEUE,
+                        job.job_id
+                    )   
+
                 else:
                     text = await loop.run_in_executor(
                         self.executor,
