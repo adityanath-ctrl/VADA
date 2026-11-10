@@ -139,23 +139,17 @@ async def complete_transcription(job_id: str, job: dict):
             "speakers": speakers
         }
 
-        print(
-            "[INFO] Sending transcription callback:",
-            job_id
-        )
 
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
                 callback_url,
                 json=payload
             )
+            
+            if response.status_code >= 400:
+                print(f"[ERROR] Callback {response.status_code}: {response.text}")
 
             response.raise_for_status()
-
-        print(
-            "[INFO] Transcription callback completed:",
-            job_id
-        )
 
         await redis.hset(
             f"job:{job_id}",
