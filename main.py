@@ -881,6 +881,7 @@ async def web(ws: WebSocket):
 
 
 @app.websocket("/ws/utterance")
+async def ws_utterance(ws: WebSocket):
     """Each binary message = one complete utterance: [uint32 LE id][int16 PCM @16 kHz]."""
     await ws.accept()
     try:
