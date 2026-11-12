@@ -42,12 +42,6 @@ class UtteranceJob:
 
 # important constants begin
 
-### ----- constant's for utterance method  ----- ###
-UTT_MAX_SAMPLES = 30 * SAMPLE_RATE
-UTT_MIN_SAMPLES = int(0.2 * SAMPLE_RATE)
-UTT_BATCH_MAX = 8
-UTT_BATCH_WAIT = 0.05
-### ----- constant's for utterance method  ----- ###
 
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -75,6 +69,15 @@ STEP_BYTES = (
     * STEP_DURATION
 )
 COMPLETION_QUEUE = "transcription:completion"
+
+### ----- constant's for utterance method  ----- ###
+UTT_MAX_SAMPLES = 30 * SAMPLE_RATE
+UTT_MIN_SAMPLES = int(0.2 * SAMPLE_RATE)
+UTT_BATCH_MAX = 8
+UTT_BATCH_WAIT = 0.05
+### ----- constant's for utterance method  ----- ###
+
+
 # important constants end
 
 
