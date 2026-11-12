@@ -21,6 +21,9 @@ import httpx
 from pydantic import BaseModel, HttpUrl
 from nemo.collections.asr.models import ASRModel
 import wave
+import json
+import os
+import httpx
 
 
 @dataclass
@@ -30,8 +33,22 @@ class AAudioJob:
     chunk_start_time: float
     is_close: bool = False
 
+@dataclass
+class UtteranceJob:
+    audio: np.ndarray
+    ws: WebSocket
+    utterance_id: int
+
 
 # important constants begin
+
+### ----- constant's for utterance method  ----- ###
+UTT_MAX_SAMPLES = 30 * SAMPLE_RATE
+UTT_MIN_SAMPLES = int(0.2 * SAMPLE_RATE)
+UTT_BATCH_MAX = 8
+UTT_BATCH_WAIT = 0.05
+### ----- constant's for utterance method  ----- ###
+
 SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # int16 = 2 bytes
@@ -65,6 +82,7 @@ COMPLETION_QUEUE = "transcription:completion"
 manager = TranscriptionManager(device="cuda", compute_type="int8_float16",condition_on_previous_text=False)
 dmanager = DiarizationManager()
 audio_queue = asyncio.Queue()
+utterance_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
 model_lock = asyncio.Lock()
 
 from contextlib import asynccontextmanager
@@ -77,19 +95,19 @@ def run_transcribe(model, audios,batch_size):
 	with torch.inference_mode(), torch.autocast(device_type='cuda',dtype=torch.bfloat16):
 		return model.transcribe(audio=audios,batch_size=batch_size, timestamps=True)
 
-import json
-import os
-import httpx
+async def safe_send(ws: WebSocket, payload: dict):
+    try:
+        await ws.send_json(payload)
+    except Exception:
+        pass  # client already gone
 
 
 async def complete_transcription(job_id: str, job: dict):
     try:
-        # Get ASR result
         words_json = await redis.get(
             f"job:{job_id}:words"
         )
 
-        # Get diarization result
         speakers_json = await redis.get(
             f"job:{job_id}:diar"
         )
@@ -107,13 +125,11 @@ async def complete_transcription(job_id: str, job: dict):
         words = json.loads(words_json)
         speaker_turns = json.loads(speakers_json)
 
-        # Merge ASR words with speaker turns
         merged = merge_words_with_speakers(
             words,
             speaker_turns
         )
 
-        # Build final transcript
         transcript = build_text_with_speakers(
             merged
         )
@@ -301,6 +317,45 @@ async def transcription_worker(model):
             audio_queue.task_done()
 
 
+async def utterance_worker(model):
+    while True:
+        batch: list[UtteranceJob] = [await utterance_queue.get()]
+        try:
+            while len(batch) < UTT_BATCH_MAX:
+                batch.append(
+                    await asyncio.wait_for(utterance_queue.get(), timeout=UTT_BATCH_WAIT)
+                )
+        except asyncio.TimeoutError:
+            pass
+
+        try:
+            async with model_lock:
+                results = await asyncio.to_thread(
+                    run_transcribe_text, model, [j.audio for j in batch], len(batch)
+                )
+            for job, hyp in zip(batch, results):
+                text = (hyp.text if hasattr(hyp, "text") else str(hyp)) or ""
+                await safe_send(job.ws, {
+                    "type": "transcript",
+                    "id": job.utterance_id,
+                    "text": text.strip(),
+                    "isFinal": True,
+                })
+        except Exception as e:
+            print(f"[Utterance worker] error: {e}")
+            for job in batch:
+                await safe_send(job.ws, {
+                    "type": "transcript",
+                    "id": job.utterance_id,
+                    "text": "",
+                    "isFinal": True,
+                    "error": True,
+                })
+        finally:
+            for _ in batch:
+                utterance_queue.task_done()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("Loading parakeet ....", flush=True)
@@ -335,7 +390,11 @@ async def lifespan(app: FastAPI):
 
         worker_task.cancel()
         completion_task.cancel()
-
+        utterance_task.cancel()   
+        await asyncio.gather(
+            worker_task, utterance_task, completion_task, return_exceptions=True
+        )
+        
         try:
             await worker_task
             await completion_task
@@ -815,3 +874,35 @@ async def web(ws: WebSocket):
 
     finally:
         await audio_queue.put(AAudioJob(audio=None, ws=ws, chunk_start_time=0.0, is_close=True))
+
+
+
+@app.websocket("/ws/utterance")
+    """Each binary message = one complete utterance: [uint32 LE id][int16 PCM @16 kHz]."""
+    await ws.accept()
+    try:
+        while True:
+            data = await ws.receive_bytes()
+            if len(data) < 4:
+                continue
+
+            uid = int.from_bytes(data[:4], "little")
+            pcm = data[4:]
+            if len(pcm) % 2:
+                pcm = pcm[:-1]
+
+            n = len(pcm) // 2
+            if n < UTT_MIN_SAMPLES or n > UTT_MAX_SAMPLES:
+                await safe_send(ws, {"type": "transcript", "id": uid, "text": "", "isFinal": True})
+                continue
+
+            audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+            try:
+                utterance_queue.put_nowait(UtteranceJob(audio=audio, ws=ws, utterance_id=uid))
+            except asyncio.QueueFull:
+                await safe_send(ws, {
+                    "type": "transcript", "id": uid, "text": "",
+                    "isFinal": True, "error": True,
+                })
+    except WebSocketDisconnect:
+        pass
