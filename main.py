@@ -93,6 +93,9 @@ import asyncio
 import torch
 from fastapi import FastAPI
 
+def run_transcribe_text(model, audios, batch_size):
+    with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+        return model.transcribe(audio=audios, batch_size=batch_size)
 
 def run_transcribe(model, audios,batch_size):
 	with torch.inference_mode(), torch.autocast(device_type='cuda',dtype=torch.bfloat16):
@@ -378,8 +381,7 @@ async def lifespan(app: FastAPI):
     completion_task = asyncio.create_task(
         completion_worker()
     )
-
-
+    utterance_task = asyncio.create_task(utterance_worker(model))
     await manager.start_workers()
 
     print("All workers started....", flush=True)
@@ -394,6 +396,7 @@ async def lifespan(app: FastAPI):
         worker_task.cancel()
         completion_task.cancel()
         utterance_task.cancel()   
+     
         await asyncio.gather(
             worker_task, utterance_task, completion_task, return_exceptions=True
         )
@@ -910,3 +913,6 @@ async def ws_utterance(ws: WebSocket):
                 })
     except WebSocketDisconnect:
         pass
+
+
+
