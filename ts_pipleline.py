@@ -4,7 +4,7 @@ import numpy as np
 MAX_CUDA_WORKERS=2
 
 class TranscriptionPipeline:
-    def __init__(self, model="tiny", device="cuda", compute_type="float16", beam_size=1,
+    def __init__(self, model="base", device="cuda", compute_type="float16", beam_size=1,
                        no_speech_threshold=0.5, avg_logprob_threshold=-1.0,
                        condition_on_previous_text=False, batch_size=16):
 
